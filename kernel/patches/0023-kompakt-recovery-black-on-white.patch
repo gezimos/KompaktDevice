@@ -1,0 +1,90 @@
+Kompakt: recovery and fastbootd in black on white
+
+mtkfb inverts the frame it hands meink in recovery and fastbootd.
+Normal boots are never inverted.
+
+diff --git a/drivers/misc/mediatek/video/mt6765/videox/mtkfb.c b/drivers/misc/mediatek/video/mt6765/videox/mtkfb.c
+index d302434b6c9c7e721ea1ee54911fae2d549b4457..e92fad4fdab5cd9fb1891de2714b7b8f9afa402a 100644
+--- a/drivers/misc/mediatek/video/mt6765/videox/mtkfb.c
++++ b/drivers/misc/mediatek/video/mt6765/videox/mtkfb.c
+@@ -241,6 +241,56 @@ static bool kompakt_frame_trace(void)
+ 	return kompakt_trace_until && time_before(jiffies, kompakt_trace_until);
+ }
+ 
++/*
++ * Kompakt: recovery and fastbootd in black on white. Inverts into its own
++ * buffer so src_pbuf_0 stays the comparison copy; alpha is kept.
++ */
++static bool kompakt_invert;
++module_param(kompakt_invert, bool, 0644);
++static u8 *kompakt_inv_buf;
++
++/* Recovery: androidboot flags present but no force_normal_boot=1. */
++static bool kompakt_is_recovery(void)
++{
++	static int cached = -1;
++
++	if (cached < 0) {
++		bool flags = strstr(saved_command_line, "androidboot.slot_suffix=") != NULL;
++		bool normal = strstr(saved_command_line, "androidboot.force_normal_boot=1") != NULL;
++
++		cached = flags && !normal;
++		pr_info("kompakt-invert: flags=%d force_normal_boot=%d -> recovery=%d\n",
++			flags, normal, cached);
++	}
++	return cached;
++}
++
++static void *kompakt_inverted(const void *src, unsigned int size,
++			      unsigned int bpp)
++{
++	const u8 *in = src;
++	u8 *out;
++	unsigned int i;
++
++	if (!kompakt_inv_buf)
++		kompakt_inv_buf = vmalloc(size);
++	if (!kompakt_inv_buf)
++		return NULL;
++	out = kompakt_inv_buf;
++	if (bpp == 4) {
++		for (i = 0; i + 3 < size; i += 4) {
++			out[i] = ~in[i];
++			out[i + 1] = ~in[i + 1];
++			out[i + 2] = ~in[i + 2];
++			out[i + 3] = in[i + 3];
++		}
++	} else {
++		for (i = 0; i < size; i++)
++			out[i] = ~in[i];
++	}
++	return out;
++}
++
+ unsigned long *acquire_screen_buffer(void)
+ {
+     mutex_lock(&screen_buf_lock);
+@@ -2601,7 +2651,22 @@ static int flushlcm_thread(void *data)
+             if(eink_update_func) {
+ 				if (kompakt_frame_trace())
+ 					pr_info("kompakt-frame: 4 -> eink_update_func\n");
+-                eink_update_func(src_pbuf_0);
++                if (kompakt_invert || kompakt_is_recovery()) {
++                    u8 *inv = kompakt_inverted(src_pbuf_0, fbsize, pixel_bpp);
++
++                    if (inv) {
++                        u8 first = inv[0];
++
++                        eink_update_func((unsigned long *)inv);
++                        /* the loader marks a dropped frame by flipping byte 0 */
++                        if (inv[0] != first)
++                            ((u8 *)src_pbuf_0)[0] ^= 0x01;
++                    } else {
++                        eink_update_func(src_pbuf_0);
++                    }
++                } else {
++                    eink_update_func(src_pbuf_0);
++                }
+             }
+ #endif
+             mutex_unlock(&screen_buf_lock);

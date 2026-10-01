@@ -1,0 +1,42 @@
+From 7978a5104723720b0593c050f4190a5e44932683 Mon Sep 17 00:00:00 2001
+From: gezimos <>
+Date: Sat, 26 Sep 2026 16:56:09 +0200
+Subject: [PATCH 5/6] Kompakt: recovery: clear the panel before the first frame
+
+Clear the e-ink panel to black and then to white before the first frame,
+so the boot logo does not ghost under the menu.
+
+Change-Id: Idd2adb75bb85860d765848a04f9a2fc1b8891cf6
+---
+ recovery_ui/screen_ui.cpp | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/recovery_ui/screen_ui.cpp b/recovery_ui/screen_ui.cpp
+index 9bcc25588724ce491c740f7b9bbed6139ff2a316..14d8dce6d957f911e6a05219d3a7245e7e30e467 100644
+--- a/recovery_ui/screen_ui.cpp
++++ b/recovery_ui/screen_ui.cpp
+@@ -40,6 +40,7 @@
+ #include <aidl/android/hardware/health/BatteryStatus.h>
+ 
+ #include <android-base/chrono_utils.h>
++#include <android-base/file.h>
+ #include <android-base/logging.h>
+ #include <android-base/properties.h>
+ #include <android-base/stringprintf.h>
+@@ -1131,6 +1132,16 @@ static bool InitGraphics() {
+ bool ScreenRecoveryUI::Init(const std::string& locale) {
+   RecoveryUI::Init(locale);
+ 
++  // Kompakt: clear the panel black then white, or the boot logo ghosts under
++  // the menu. Harmless where the node does not exist.
++  for (const char* fill : { "0", "1" }) {
++    if (android::base::WriteStringToFile(fill, "/sys/einkinfo/clear")) {
++      LOG(INFO) << "Kompakt: panel cleared, fill " << fill;
++    } else {
++      PLOG(WARNING) << "Kompakt: panel clear, fill " << fill;
++    }
++  }
++
+   if (!InitGraphics()) {
+     return false;
+   }

@@ -1,0 +1,24 @@
+# Per-node types for the e-ink panel. See docs/Vendor.md section 2.
+
+# Stock labels; keep them so the blobs see the same types.
+type sysfs_eink_waveform, fs_type, sysfs_type;
+type sysfs_eink_bpp, fs_type, sysfs_type;
+type sysfs_eink_contrast, fs_type, sysfs_type;
+type sysfs_eink_gamma, fs_type, sysfs_type;
+type sysfs_eink_brightness, fs_type, sysfs_type;
+type sysfs_eink_temperature, fs_type, sysfs_type;
+type sysfs_eink_fps, fs_type, sysfs_type;
+type sysfs_eink_power, fs_type, sysfs_type;
+type sysfs_eink_timings_mode, fs_type, sysfs_type;
+type sysfs_eink_dithering_type, fs_type, sysfs_type;
+type sysfs_eink_dithering_param, fs_type, sysfs_type;
+type sysfs_eink_dithering_colors, fs_type, sysfs_type;
+type sysfs_eink_update, fs_type, sysfs_type;
+type sysfs_bit_switch, fs_type, sysfs_type;
+type sysfs_irqkey, fs_type, sysfs_type;
+
+# Nodes stock leaves as generic sysfs, which a system app can never be granted.
+type sysfs_eink_refresh_mode, fs_type, sysfs_type;
+type sysfs_eink_manual_mode, fs_type, sysfs_type;
+type sysfs_eink_temperature_offset, fs_type, sysfs_type;
+type sysfs_eink_log_level, fs_type, sysfs_type;

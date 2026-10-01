@@ -1,0 +1,72 @@
+From 7a213cf604d509942d65657219df7f2a705f0ec5 Mon Sep 17 00:00:00 2001
+From: gezimos <>
+Date: Sat, 26 Sep 2026 15:30:24 +0200
+Subject: [PATCH 3/5] Kompakt: recovery: the selected row is outlined, not
+ filled
+
+The selected row is outlined in ink, 3 px, instead of filled. Every row
+keeps black text on paper.
+
+Change-Id: Ic82e9eae2c05dcd65dd24fe55ac3947f73522170
+---
+ recovery_ui/screen_ui.cpp | 30 ++++++++++++++++++++++--------
+ 1 file changed, 22 insertions(+), 8 deletions(-)
+
+diff --git a/recovery_ui/screen_ui.cpp b/recovery_ui/screen_ui.cpp
+index b0c5b71e2d44fe10f16c8e8c2edc1262aade2927..9bcc25588724ce491c740f7b9bbed6139ff2a316 100644
+--- a/recovery_ui/screen_ui.cpp
++++ b/recovery_ui/screen_ui.cpp
+@@ -183,6 +183,15 @@ int TextMenu::DrawHeader(int x, int y) const {
+   return offset;
+ }
+ 
++// Kompakt: outline the selected row instead of filling it.
++static void DrawKompaktOutline(const DrawInterface& draw, int x, int y, int w, int h) {
++  constexpr int t = 3;
++  draw.DrawHighlightBar(x, y, w, t);
++  draw.DrawHighlightBar(x, y + h - t, w, t);
++  draw.DrawHighlightBar(x, y, t, h);
++  draw.DrawHighlightBar(x + w - t, y, t, h);
++}
++
+ int TextMenu::DrawItems(int /*x*/, int y, int screen_width, bool long_press) const {
+   int horizontal_rule_height = 8;
+   int offset = 0;
+@@ -197,15 +206,18 @@ int TextMenu::DrawItems(int /*x*/, int y, int screen_width, bool long_press) con
+   for (size_t i = MenuStart(); i < MenuEnd(); ++i) {
+     const auto selected = i == selection();
+ 
+-    // Draw the highlight bar.
+-    draw_funcs_.SetColor(long_press ? UIElement::MENU_SEL_BG_ACTIVE
+-                         : selected ? UIElement::MENU_SEL_BG
+-                                    : UIElement::MENU_BG);
++    // Kompakt: every row on paper, the selected one outlined.
++    draw_funcs_.SetColor(UIElement::MENU_BG);
+ 
+     int bar_height = padding + char_height_ + padding;
+     draw_funcs_.DrawHighlightBar(padding, y + offset, screen_width - (padding * 2), bar_height);
++    if (selected) {
++      draw_funcs_.SetColor(long_press ? UIElement::MENU_SEL_BG_ACTIVE : UIElement::MENU_SEL_BG);
++      DrawKompaktOutline(draw_funcs_, padding, y + offset, screen_width - (padding * 2),
++                         bar_height);
++    }
+ 
+-    draw_funcs_.SetColor(selected ? UIElement::MENU_SEL_FG : UIElement::MENU);
++    draw_funcs_.SetColor(UIElement::MENU);
+     offset += draw_funcs_.DrawTextLine(padding * 2, y + offset, TextItem(i), false /* bold */);
+     offset += spacing;
+   }
+@@ -271,10 +283,10 @@ int GraphicMenu::DrawItems(int x, int y, int screen_width, bool long_press) cons
+       draw_funcs_.SetColor(long_press ? UIElement::MENU_SEL_BG_ACTIVE : UIElement::MENU_SEL_BG);
+ 
+       int bar_height = item->height + 4;
+-      draw_funcs_.DrawHighlightBar(0, y + offset - 2, screen_width, bar_height);
++      // Kompakt: outlined, not filled; see DrawKompaktOutline.
++      DrawKompaktOutline(draw_funcs_, 0, y + offset - 2, screen_width, bar_height);
+ 
+-      // Bold white text for the selected item.
+-      draw_funcs_.SetColor(UIElement::MENU_SEL_FG);
++      draw_funcs_.SetColor(UIElement::MENU);
+     }
+     draw_funcs_.DrawTextIcon(x, y + offset, item.get());
+     offset += item->height;

@@ -1,0 +1,63 @@
+Kompakt: GPU: sync lockup recovery stays on
+
+The PowerVR GL blob asks for Sync Lockup Recovery to be disabled on every
+context. When a fence never signals, the stalled-CCB check then only logs
+"SLR disabled" every 200 ms, and SystemUI's renderer, with its main thread,
+stays wedged until the next wake: the AOD clock froze for minutes. The client's
+request is ignored, so the check force-signals the dead fences and the
+renderer carries on.
+
+The client CCB is allocated with OSAllocMem, which does not zero, and nothing
+cleared its flags: with the request ignored, a stale bit still left recovery
+off. The flags are now cleared at allocation.
+
+--- a/drivers/gpu/mediatek/gpu_rgx/m1.15ED6070602/services/server/devices/rgxccb.c
++++ b/drivers/gpu/mediatek/gpu_rgx/m1.15ED6070602/services/server/devices/rgxccb.c
+@@ -587,6 +587,9 @@ PVRSRV_ERROR RGXCreateCCB(PVRSRV_RGXDEV_INFO	*psDevInfo,
+ 		goto fail_alloc;
+ 	}
+ 	psClientCCB->psServerCommonContext = psServerCommonContext;
++	/* Kompakt: OSAllocMem does not zero, and nothing else clears the flags;
++	 * a stale SLR-disabled bit turned recovery off at random. */
++	psClientCCB->ui32CCBFlags = 0;
+ 
+ #if defined(PVRSRV_ENABLE_CCCB_GROW)
+ 	psClientCCB->ui32VirtualAllocSize = 0;
+@@ -612,15 +615,11 @@ PVRSRV_ERROR RGXCreateCCB(PVRSRV_RGXDEV_INFO	*psDevInfo,
+ 								PVRSRV_MEMALLOCFLAG_KERNEL_CPU_MAPPABLE |
+ 								PVRSRV_MEMALLOCFLAG_PHYS_HEAP_HINT(FW_MAIN);
+ 
+-	/* If connection data indicates Sync Lockup Recovery (SLR) should be disabled,
+-	 * or if the caller has set ui32ContextFlags to disable SLR for this context,
+-	 * indicate this in psClientCCB->ui32CCBFlags.
++	/* Kompakt: Sync Lockup Recovery stays on whatever the client asks. The GL
++	 * blob disables it, so a fence that never signals wedged SystemUI's
++	 * renderer until the next wake: the AOD clock froze for minutes. With SLR
++	 * the stalled-CCB check force-signals the dead fences instead.
+ 	 */
+-	if ((psConnectionData->ui32ClientFlags & SRV_FLAGS_CLIENT_SLR_DISABLED) ||
+-	    (ui32ContextFlags & RGX_CONTEXT_FLAG_DISABLESLR))
+-	{
+-		BIT_SET(psClientCCB->ui32CCBFlags, CCB_FLAGS_SLR_DISABLED);
+-	}
+ 
+ 	PDUMPCOMMENT("Allocate RGXFW cCCB");
+ #if defined(PVRSRV_ENABLE_CCCB_GROW)
+@@ -1541,14 +1540,9 @@ IMG_UINT32 RGXGetWrapMaskCCB(RGX_CLIENT_CCB *psClientCCB)
+ PVRSRV_ERROR RGXSetCCBFlags(RGX_CLIENT_CCB *psClientCCB,
+ 							IMG_UINT32		ui32Flags)
+ {
+-	if ((ui32Flags & RGX_CONTEXT_FLAG_DISABLESLR))
+-	{
+-		BIT_SET(psClientCCB->ui32CCBFlags, CCB_FLAGS_SLR_DISABLED);
+-	}
+-	else
+-	{
+-		BIT_UNSET(psClientCCB->ui32CCBFlags, CCB_FLAGS_SLR_DISABLED);
+-	}
++	/* Kompakt: never disable SLR, see RGXCreateCCB. */
++	PVR_UNREFERENCED_PARAMETER(ui32Flags);
++	BIT_UNSET(psClientCCB->ui32CCBFlags, CCB_FLAGS_SLR_DISABLED);
+ 	return PVRSRV_OK;
+ }
+ 

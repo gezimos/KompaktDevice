@@ -1,0 +1,2342 @@
+diff --git a/arch/arm64/configs/Kompakt_defconfig b/arch/arm64/configs/Kompakt_defconfig
+index abcf84be35321bb7647f9c77043fbc8183df25f8..483a1b338aa1d5e86296c8441506aa17d562bf43 100644
+--- a/arch/arm64/configs/Kompakt_defconfig
++++ b/arch/arm64/configs/Kompakt_defconfig
+@@ -363,6 +363,7 @@ CONFIG_MMC_SDHCI=m
+ CONFIG_MMC_SDHCI_PLTFM=m
+ CONFIG_NEW_LEDS=y
+ CONFIG_LEDS_CLASS=y
++CONFIG_LEDS_TRIGGER_TIMER=y
+ CONFIG_LEDS_REGULATOR_VIBRATOR=y
+ CONFIG_LEDS_TRIGGERS=y
+ CONFIG_EDAC=y
+diff --git a/drivers/misc/kompakt/Makefile b/drivers/misc/kompakt/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..f382f73b2d72647aad335e2a04aeeda6feffe314
+--- /dev/null
++++ b/drivers/misc/kompakt/Makefile
+@@ -0,0 +1,2 @@
++obj-m += kompakt_eink.o
++ccflags-y += -I$(srctree)/drivers/misc/mudita -I$(srctree)/drivers/misc/mudita/eink_loader
+diff --git a/drivers/misc/kompakt/kompakt_eink.c b/drivers/misc/kompakt/kompakt_eink.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..8848b159947a2eca1c1cc88c6255b30831fd138e
+--- /dev/null
++++ b/drivers/misc/kompakt/kompakt_eink.c
+@@ -0,0 +1,363 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Kompakt e-ink shim: replaces meink.ko's callback table (registration is
++ * last-wins), forwards every call to it and traces the driver API.
++ * Load after meink.ko, before anything drives the panel.
++ */
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/printk.h>
++
++#include "../mudita/eink_loader/eink_hal.h"
++
++/* On by default: the sysfs switch is not reachable without root. */
++static int trace = 1;
++module_param(trace, int, 0644);
++MODULE_PARM_DESC(trace, "log every call made through the e-ink callback table");
++
++/* meink's table, captured at init. */
++static const EinkCallbackTable_t *blob;
++
++#define T(fmt, ...) \
++	do { if (trace) pr_info("kompakt-eink: " fmt "\n", ##__VA_ARGS__); } while (0)
++
++/* meink may leave slots NULL, so check before forwarding. */
++#define FWD(slot, call, ret_on_null) \
++	(blob && blob->slot ? (blob->call) : (ret_on_null))
++
++static int k_init(EinkHndl_t *eink, void *commHndl)
++{
++	T("init");
++	return FWD(init, init(eink, commHndl), -ENODEV);
++}
++
++static int k_deinit(EinkHndl_t *eink)
++{
++	T("deinit");
++	return FWD(deinit, deinit(eink), -ENODEV);
++}
++
++static int k_wakeup(EinkHndl_t const eink)
++{
++	T("wakeup");
++	return FWD(wakeup, wakeup(eink), -ENODEV);
++}
++
++static int k_sleep(EinkHndl_t const eink)
++{
++	T("sleep");
++	return FWD(sleep, sleep(eink), -ENODEV);
++}
++
++static int k_powerOff(EinkHndl_t const eink, int state)
++{
++	T("powerOff state=%d", state);
++	return FWD(powerOff, powerOff(eink, state), -ENODEV);
++}
++
++static int k_clearScreen(EinkHndl_t const eink, enum EInkFillPattern pattern,
++			 unsigned int restoreFrame)
++{
++	T("clearScreen pattern=%d restore=%u", pattern, restoreFrame);
++	return FWD(clearScreen, clearScreen(eink, pattern, restoreFrame), -ENODEV);
++}
++
++static int k_writeImage(EinkHndl_t const eink, unsigned char *image)
++{
++	T("writeImage");
++	return FWD(writeImage, writeImage(eink, image), -ENODEV);
++}
++
++static int k_writeImagePart(EinkHndl_t const eink, unsigned char *image,
++			    EinkImagePart_t src, EinkImagePart_t dst)
++{
++	T("writeImagePart src=(%u,%u %ux%u) dst=(%u,%u %ux%u)",
++	  src.offset.x, src.offset.y, src.width, src.height,
++	  dst.offset.x, dst.offset.y, dst.width, dst.height);
++	return FWD(writeImagePart, writeImagePart(eink, image, src, dst), -ENODEV);
++}
++
++static int k_refreshScreen(EinkHndl_t const eink)
++{
++	T("refreshScreen");
++	return FWD(refreshScreen, refreshScreen(eink), -ENODEV);
++}
++
++static int k_getBpp(EinkHndl_t const eink, unsigned int *bpp)
++{
++	return FWD(getBpp, getBpp(eink, bpp), -ENODEV);
++}
++
++static int k_setBpp(EinkHndl_t const eink, unsigned int bpp)
++{
++	T("setBpp %u", bpp);
++	return FWD(setBpp, setBpp(eink, bpp), -ENODEV);
++}
++
++static int k_getWaveformMode(EinkHndl_t const eink, enum EInkWaveformType *mode)
++{
++	return FWD(getWaveformMode, getWaveformMode(eink, mode), -ENODEV);
++}
++
++static int k_setWaveformType(EinkHndl_t const eink, enum EInkWaveformType type)
++{
++	T("setWaveformType %d", type);
++	return FWD(setWaveformType, setWaveformType(eink, type), -ENODEV);
++}
++
++static const char *k_getWaveformModeName(enum EInkWaveformType type)
++{
++	return blob && blob->getWaveformModeName ?
++		blob->getWaveformModeName(type) : "";
++}
++
++static enum EInkWaveformType k_decodeWaveformModeName(const char *name)
++{
++	return blob && blob->decodeWaveformModeName ?
++		blob->decodeWaveformModeName(name) : kEinkWaveformInvalid;
++}
++
++static int k_setTconTimingsMode(EinkHndl_t const eink, enum EInkTimingsMode mode)
++{
++	T("setTconTimingsMode %d", mode);
++	return FWD(setTconTimingsMode, setTconTimingsMode(eink, mode), -ENODEV);
++}
++
++static int k_getTconTimingsMode(EinkHndl_t const eink, enum EInkTimingsMode *t)
++{
++	return FWD(getTconTimingsMode, getTconTimingsMode(eink, t), -ENODEV);
++}
++
++static const char *k_getTconTimingsModeName(enum EInkTimingsMode type)
++{
++	return blob && blob->getTconTimingsModeName ?
++		blob->getTconTimingsModeName(type) : "";
++}
++
++static enum EInkTimingsMode k_decodeTconTimingsModeName(const char *name)
++{
++	return blob && blob->decodeTconTimingsModeName ?
++		blob->decodeTconTimingsModeName(name) : kEinkTimingsUnknown;
++}
++
++static enum EInkRefreshMode k_decodeRefreshModeName(const char *name)
++{
++	return blob && blob->decodeRefreshModeName ?
++		blob->decodeRefreshModeName(name) : kEinkRefreshInvalid;
++}
++
++static const char *k_getRefreshModeName(enum EInkRefreshMode mode)
++{
++	return blob && blob->getRefreshModeName ?
++		blob->getRefreshModeName(mode) : "";
++}
++
++static int k_getRefreshMode(EinkHndl_t const eink, enum EInkRefreshMode *mode)
++{
++	return FWD(getRefreshMode, getRefreshMode(eink, mode), -ENODEV);
++}
++
++static int k_setRefreshMode(EinkHndl_t const eink, enum EInkRefreshMode mode)
++{
++	T("setRefreshMode %d", mode);
++	return FWD(setRefreshMode, setRefreshMode(eink, mode), -ENODEV);
++}
++
++static enum EInkState k_getState(EinkHndl_t const eink)
++{
++	return blob && blob->getState ? blob->getState(eink) : kEinkStateInvalid;
++}
++
++static int k_getUpdateMode(EinkHndl_t const eink, enum EInkUpdateMode *mode)
++{
++	return FWD(getUpdateMode, getUpdateMode(eink, mode), -ENODEV);
++}
++
++static int k_getDisplayShape(EinkHndl_t const eink, struct EinkDisplayShape *shape)
++{
++	return FWD(getDisplayShape, getDisplayShape(eink, shape), -ENODEV);
++}
++
++static int k_setContrast(EinkHndl_t const eink, unsigned char contrast)
++{
++	T("setContrast %u", contrast);
++	return FWD(setContrast, setContrast(eink, contrast), -ENODEV);
++}
++
++static int k_getContrast(EinkHndl_t const eink, unsigned char *contrast)
++{
++	return FWD(getContrast, getContrast(eink, contrast), -ENODEV);
++}
++
++static int k_setBrightness(EinkHndl_t const eink, unsigned char level)
++{
++	T("setBrightness %u", level);
++	return FWD(setBrightness, setBrightness(eink, level), -ENODEV);
++}
++
++static int k_getBrightness(EinkHndl_t const eink, unsigned char *level)
++{
++	return FWD(getBrightness, getBrightness(eink, level), -ENODEV);
++}
++
++static int k_setGammaCorrection(EinkHndl_t const eink,
++				enum EInkGammaCorrectionLevel level)
++{
++	T("setGammaCorrection %d", level);
++	return FWD(setGammaCorrection, setGammaCorrection(eink, level), -ENODEV);
++}
++
++static int k_getGammaCorrection(EinkHndl_t const eink,
++				enum EInkGammaCorrectionLevel *level)
++{
++	return FWD(getGammaCorrection, getGammaCorrection(eink, level), -ENODEV);
++}
++
++static int k_getDitheringParameter(EinkHndl_t const eink, int *value)
++{
++	return FWD(getDitheringParameter, getDitheringParameter(eink, value), -ENODEV);
++}
++
++static int k_setDitheringParameter(EinkHndl_t const eink, int value)
++{
++	T("setDitheringParameter %d", value);
++	return FWD(setDitheringParameter, setDitheringParameter(eink, value), -ENODEV);
++}
++
++static int k_getDitheringType(EinkHndl_t const eink, enum EInkDitheringType *type)
++{
++	return FWD(getDitheringType, getDitheringType(eink, type), -ENODEV);
++}
++
++/* A dither_colors write makes the loader force FloydSteinbergOpt1 here. */
++static int k_setDitheringType(EinkHndl_t const eink, enum EInkDitheringType type)
++{
++	T("setDitheringType %d%s", type,
++	  type == kEinkDitheringTypeFloydSteinbergOpt1 ?
++		" (may be dither_colors forcing it)" : "");
++	return FWD(setDitheringType, setDitheringType(eink, type), -ENODEV);
++}
++
++static int k_getTemperatureCorrection(EinkHndl_t const eink, int *correction)
++{
++	return FWD(getTemperatureCorrection, getTemperatureCorrection(eink, correction), -ENODEV);
++}
++
++/* The correction shifts the waveform temperature band, 3 degrees C per band. */
++static int k_setTemperatureCorrection(EinkHndl_t const eink, int correction)
++{
++	T("setTemperatureCorrection %d (shifts the waveform band)", correction);
++	return FWD(setTemperatureCorrection, setTemperatureCorrection(eink, correction), -ENODEV);
++}
++
++static int k_getTemperature(EinkHndl_t const eink, int *temperature)
++{
++	int ret = FWD(getTemperature, getTemperature(eink, temperature), -ENODEV);
++
++	if (!ret && temperature)
++		T("getTemperature %d -> band %d", *temperature, *temperature / 3);
++	return ret;
++}
++
++static int k_enableManualMode(EinkHndl_t const eink, unsigned int enable)
++{
++	T("enableManualMode %u", enable);
++	return FWD(enableManualMode, enableManualMode(eink, enable), -ENODEV);
++}
++
++static int k_getManualMode(EinkHndl_t const eink, unsigned int *enable)
++{
++	return FWD(getManualMode, getManualMode(eink, enable), -ENODEV);
++}
++
++static void k_setFpsLimit(unsigned int fps)
++{
++	T("setFpsLimit %u", fps);
++	if (blob && blob->setFpsLimit)
++		blob->setFpsLimit(fps);
++}
++
++static int k_getFpsLimit(void)
++{
++	return blob && blob->getFpsLimit ? blob->getFpsLimit() : 0;
++}
++
++static const EinkCallbackTable_t kompakt_table = {
++	.init			= k_init,
++	.deinit			= k_deinit,
++	.wakeup			= k_wakeup,
++	.sleep			= k_sleep,
++	.powerOff		= k_powerOff,
++	.clearScreen		= k_clearScreen,
++	.writeImage		= k_writeImage,
++	.writeImagePart		= k_writeImagePart,
++	.refreshScreen		= k_refreshScreen,
++	.getBpp			= k_getBpp,
++	.setBpp			= k_setBpp,
++	.getWaveformMode	= k_getWaveformMode,
++	.setWaveformType	= k_setWaveformType,
++	.getWaveformModeName	= k_getWaveformModeName,
++	.decodeWaveformModeName	= k_decodeWaveformModeName,
++	.setTconTimingsMode	= k_setTconTimingsMode,
++	.getTconTimingsMode	= k_getTconTimingsMode,
++	.getTconTimingsModeName	= k_getTconTimingsModeName,
++	.decodeTconTimingsModeName = k_decodeTconTimingsModeName,
++	.decodeRefreshModeName	= k_decodeRefreshModeName,
++	.getRefreshModeName	= k_getRefreshModeName,
++	.getRefreshMode		= k_getRefreshMode,
++	.setRefreshMode		= k_setRefreshMode,
++	.getState		= k_getState,
++	.getUpdateMode		= k_getUpdateMode,
++	.getDisplayShape	= k_getDisplayShape,
++	.setContrast		= k_setContrast,
++	.getContrast		= k_getContrast,
++	.setBrightness		= k_setBrightness,
++	.getBrightness		= k_getBrightness,
++	.setGammaCorrection	= k_setGammaCorrection,
++	.getGammaCorrection	= k_getGammaCorrection,
++	.getDitheringParameter	= k_getDitheringParameter,
++	.setDitheringParameter	= k_setDitheringParameter,
++	.getDitheringType	= k_getDitheringType,
++	.setDitheringType	= k_setDitheringType,
++	.getTemperatureCorrection = k_getTemperatureCorrection,
++	.setTemperatureCorrection = k_setTemperatureCorrection,
++	.getTemperature		= k_getTemperature,
++	.enableManualMode	= k_enableManualMode,
++	.getManualMode		= k_getManualMode,
++	.setFpsLimit		= k_setFpsLimit,
++	.getFpsLimit		= k_getFpsLimit,
++};
++
++static int __init kompakt_eink_init(void)
++{
++	blob = eink_getCallback();
++	if (!blob) {
++		/* meink.ko not loaded: a table forwarding nowhere would freeze the panel. */
++		pr_err("kompakt-eink: no callback table registered yet, load after meink.ko\n");
++		return -EAGAIN;
++	}
++	if (blob == &kompakt_table) {
++		pr_err("kompakt-eink: already installed\n");
++		return -EBUSY;
++	}
++
++	eink_registerCallbackTable(&kompakt_table);
++	pr_info("kompakt-eink: installed over %ps, trace=%d\n", blob, trace);
++	return 0;
++}
++
++static void __exit kompakt_eink_exit(void)
++{
++	/* Hand the panel back before we go, or the next call is into freed text. */
++	if (blob)
++		eink_registerCallbackTable(blob);
++	pr_info("kompakt-eink: removed\n");
++}
++
++module_init(kompakt_eink_init);
++module_exit(kompakt_eink_exit);
++
++MODULE_DESCRIPTION("Kompakt e-ink shim over meink.ko");
++MODULE_LICENSE("GPL v2");
++MODULE_SOFTDEP("pre: meink");
+diff --git a/drivers/misc/mediatek/lcm/nt35521_hd_dsi_vdo_truly_rt5081/nt35521_hd_dsi_vdo_truly_rt5081.c b/drivers/misc/mediatek/lcm/nt35521_hd_dsi_vdo_truly_rt5081/nt35521_hd_dsi_vdo_truly_rt5081.c
+index 05c2a8cc135dbc07a455b5773e075d94184083b8..dfc5c1b939bff90f9fe2e731ad540ba01f625f91 100644
+--- a/drivers/misc/mediatek/lcm/nt35521_hd_dsi_vdo_truly_rt5081/nt35521_hd_dsi_vdo_truly_rt5081.c
++++ b/drivers/misc/mediatek/lcm/nt35521_hd_dsi_vdo_truly_rt5081/nt35521_hd_dsi_vdo_truly_rt5081.c
+@@ -552,6 +552,14 @@ static void *lcm_switch_mode(int mode)
+ }
+ 
+ 
++static void lcm_aod(int enter)
++{
++	/* No-op, but .aod must be non-NULL: otherwise disp_lcm_aod() fails
++	 * and AOD entry falls back to a full disp_lcm_resume().
++	 */
++	pr_info("kompakt-aod: lcm_aod(%d)\n", enter);
++}
++
+ struct LCM_DRIVER nt35521_hd_dsi_vdo_truly_rt5081_lcm_drv = {
+ 	.name = "nt35521_hd_dsi_vdo_truly_rt5081_drv",
+ 	.set_util_funcs = lcm_set_util_funcs,
+@@ -568,4 +576,5 @@ struct LCM_DRIVER nt35521_hd_dsi_vdo_truly_rt5081_lcm_drv = {
+ 	.ata_check = lcm_ata_check,
+ 	.update = lcm_update,
+ 	.switch_mode = lcm_switch_mode,
++	.aod = lcm_aod,
+ };
+diff --git a/drivers/misc/mediatek/video/mt6765/videox/mtkfb.c b/drivers/misc/mediatek/video/mt6765/videox/mtkfb.c
+index 4f8da20c5002e2659f60b370139eb970bdfd6671..d302434b6c9c7e721ea1ee54911fae2d549b4457 100644
+--- a/drivers/misc/mediatek/video/mt6765/videox/mtkfb.c
++++ b/drivers/misc/mediatek/video/mt6765/videox/mtkfb.c
+@@ -219,6 +219,27 @@ extern void IT8951_show_logo(struct fb_info *info);
+ #if defined(CONFIG_PANEL_EINK_TCON) || defined(CONFIG_PANEL_EINK_TCON_MODULE) || defined(CONFIG_EINK_MTKFB_SUPPORT)
+ static int (*eink_update_func)(void *ptr) = NULL;
+ static int (*eink_aod_func)(unsigned int einkEnable) = NULL;
++/* What meink was last told, not the display power mode: the DOZE enter
++ * path calls eink_aod_func(1) even when the display never reached DOZE.
++ */
++static bool kompakt_eink_in_aod;
++
++/* Frame-path tracing (trigger, capture, flush, eink_update_func), off by
++ * default. Set kompakt_frame_trace_on to arm it for 15 s after an AOD exit.
++ */
++static bool kompakt_frame_trace_on;
++static unsigned long kompakt_trace_until;
++
++static void kompakt_arm_frame_trace(void)
++{
++	if (kompakt_frame_trace_on)
++		kompakt_trace_until = jiffies + msecs_to_jiffies(15000);
++}
++
++static bool kompakt_frame_trace(void)
++{
++	return kompakt_trace_until && time_before(jiffies, kompakt_trace_until);
++}
+ 
+ unsigned long *acquire_screen_buffer(void)
+ {
+@@ -245,6 +266,32 @@ void unregister_eink_refresh_func(void)
+ }
+ EXPORT_SYMBOL(unregister_eink_refresh_func);
+ 
++static void (*eink_force_full_func)(void) = NULL;
++
++void register_eink_force_full_func(void (*func))
++{
++    eink_force_full_func = func;
++}
++EXPORT_SYMBOL(register_eink_force_full_func);
++
++static void (*eink_aod_exit_begin_func)(void) = NULL;
++static void (*eink_aod_exit_end_func)(void) = NULL;
++
++void register_eink_aod_exit_funcs(void (*begin)(void), void (*end)(void))
++{
++    eink_aod_exit_begin_func = begin;
++    eink_aod_exit_end_func = end;
++}
++EXPORT_SYMBOL(register_eink_aod_exit_funcs);
++
++static void (*eink_repower_func)(void) = NULL;
++
++void register_eink_repower_func(void (*func))
++{
++    eink_repower_func = func;
++}
++EXPORT_SYMBOL(register_eink_repower_func);
++
+ void register_eink_aod_func(void (*func))
+ {
+     eink_aod_func = func;
+@@ -333,6 +380,33 @@ static int mtkfb_blank(int blank_mode, struct fb_info *info)
+ 			break;
+ 		}
+ 
++		/* Kompakt: resume never takes meink out of AOD on a DOZE wake, so do
++		 * it here with its POF held off. Key on kompakt_eink_in_aod, not prev_pm:
++		 * a second eink_aod_func(0) stops meink feeding frames.
++		 */
++		if (kompakt_eink_in_aod && eink_aod_func != NULL) {
++			int aret;
++
++			if (eink_aod_exit_begin_func != NULL)
++				eink_aod_exit_begin_func();
++			aret = eink_aod_func(0);
++			if (eink_aod_exit_end_func != NULL)
++				eink_aod_exit_end_func();
++
++			/* The DISP_ALIVE resume skips meink's power-up request; make it here. */
++			if (eink_repower_func != NULL)
++				eink_repower_func();
++			kompakt_arm_frame_trace();
++
++			kompakt_eink_in_aod = false;
++			if (eink_force_full_func != NULL)
++				eink_force_full_func();
++			pr_info("kompakt-aod: wake, eink_aod_func(0) -> %d (prev_pm=%d)\n",
++				aret, prev_pm);
++		} else {
++			pr_info("kompakt-aod: wake, meink not in AOD, left alone (prev_pm=%d)\n",
++				prev_pm);
++		}
+ 		primary_display_set_power_mode(FB_RESUME);
+ 		mtkfb_late_resume();
+ 
+@@ -349,6 +423,17 @@ static int mtkfb_blank(int blank_mode, struct fb_info *info)
+ 			break;
+ 		}
+ 
++		/* Kompakt: the display half handles DOZE -> FB_SUSPEND; meink does not. */
++		if ((prev_pm == DOZE || prev_pm == DOZE_SUSPEND ||
++		     kompakt_eink_in_aod) && eink_aod_func != NULL) {
++			int aret = eink_aod_func(0);
++
++			kompakt_eink_in_aod = false;
++			if (eink_force_full_func != NULL)
++				eink_force_full_func();
++			pr_info("kompakt-aod: powerdown, eink_aod_func(0) -> %d (prev_pm=%d)\n",
++				aret, prev_pm);
++		}
+ 		primary_display_set_power_mode(FB_SUSPEND);
+ 		mtkfb_early_suspend();
+ 
+@@ -1127,6 +1212,9 @@ static int mtkfb_ioctl(struct fb_info *info, unsigned int cmd,
+ 			primary_display_get_power_mode();
+ 
+ 		aod_pm = (enum mtkfb_aod_power_mode)arg;
++		pr_info("kompakt-aod: ioctl pm=%d aod_supported=%d eink_func=%d\n",
++			(int)aod_pm, primary_is_aod_supported() ? 1 : 0,
++			eink_aod_func != NULL);
+ 		DISPCHECK("AOD: ioctl: %s\n",
+ 			aod_pm != MTKFB_AOD_DOZE ? "AOD_DOZE_SUSPEND" : "AOD_DOZE");
+ 
+@@ -1159,6 +1247,10 @@ static int mtkfb_ioctl(struct fb_info *info, unsigned int cmd,
+ 			if (eink_aod_func != NULL)
+ 			{
+ 				ret = eink_aod_func(0);
++				kompakt_eink_in_aod = false;
++				if (eink_force_full_func != NULL)
++					eink_force_full_func();
++				pr_info("kompakt-aod: DOZE_SUSPEND, eink_aod_func(0) -> %d\n", ret);
+ 			}
+ 			debug_print_power_mode_check(prev_pm, DOZE_SUSPEND);
+ 		} else if (aod_pm == MTKFB_AOD_DOZE) {
+@@ -1171,6 +1263,10 @@ static int mtkfb_ioctl(struct fb_info *info, unsigned int cmd,
+ 			if (eink_aod_func != NULL)
+ 			{
+ 				ret = eink_aod_func(1);
++				kompakt_eink_in_aod = true;
++				if (eink_force_full_func != NULL)
++					eink_force_full_func();
++				pr_info("kompakt-aod: DOZE enter, eink_aod_func(1) -> %d\n", ret);
+ 			}
+ 			debug_print_power_mode_check(prev_pm, DOZE);
+ 		} else {
+@@ -2435,12 +2531,33 @@ void lcm_hook_primary_display_trigger(int blocking)
+ 	set_capture_state(1);
+ 	spin_unlock_irqrestore(&capture_lock, flags);
+ 	wake_up_interruptible(&capture_waiter);
++	if (kompakt_frame_trace())
++		pr_info("kompakt-frame: 1 trigger\n");
+     return;
+ }
+ 
+ 
+ 
+ static struct task_struct *flush_task;
++
++/*
++ * Repaint an unchanged screen. A waveform or bpp change only applies to the
++ * next frame, and the flush thread skips an unchanged framebuffer.
++ */
++static bool kompakt_repaint_req;
++
++void kompakt_request_repaint(void)
++{
++	unsigned long flags;
++
++	kompakt_repaint_req = true;
++	spin_lock_irqsave(&capture_lock, flags);
++	g_start_flush = 1;
++	spin_unlock_irqrestore(&capture_lock, flags);
++	wake_up_interruptible(&flush_waiter);
++}
++EXPORT_SYMBOL(kompakt_request_repaint);
++
+ static int flushlcm_thread(void *data)
+ {
+     struct fb_info fbi;
+@@ -2469,14 +2586,21 @@ static int flushlcm_thread(void *data)
+ 
+ 		set_current_state(TASK_RUNNING);
+ 
+-		if(memcmp(src_pbuf, src_pbuf_0, fbsize) != 0)
++		if (kompakt_frame_trace())
++			pr_info("kompakt-frame: 3 flush changed=%d\n",
++				memcmp(src_pbuf, src_pbuf_0, fbsize) != 0);
++
++		if(memcmp(src_pbuf, src_pbuf_0, fbsize) != 0 || kompakt_repaint_req)
+ 		{
++			kompakt_repaint_req = false;
+             mutex_lock(&screen_buf_lock);
+             //pr_warn("%s@%d Do EINK Update %p:%p\n", __func__, __LINE__, src_pbuf, src_pbuf_0);
+ 			//IT8951_show_logo(&fbi);
+ 			memcpy(src_pbuf_0, src_pbuf, fbsize);
+ #if defined(CONFIG_PANEL_EINK_TCON) || defined(CONFIG_PANEL_EINK_TCON_MODULE) || defined(CONFIG_EINK_MTKFB_SUPPORT)
+             if(eink_update_func) {
++				if (kompakt_frame_trace())
++					pr_info("kompakt-frame: 4 -> eink_update_func\n");
+                 eink_update_func(src_pbuf_0);
+             }
+ #endif
+@@ -2535,6 +2659,8 @@ static int capture_thread(void *data)
+ 			if (ret < 0) {
+         	    MTKFB_LOG("primary capture framebuffer failed\n");
+             }
++			if (kompakt_frame_trace())
++				pr_info("kompakt-frame: 2 captured ret=%d\n", ret);
+ 		}
+ 
+ 		wait_event_interruptible(capture_waiter, g_start_capture != 0);
+diff --git a/drivers/misc/mediatek/video/mt6765/videox/primary_display.c b/drivers/misc/mediatek/video/mt6765/videox/primary_display.c
+index f4f24e2102d2d4a6d430de9e762e36aeef0666ee..f2e3c886cf78a80cc3b74c3c73294623c411e84b 100644
+--- a/drivers/misc/mediatek/video/mt6765/videox/primary_display.c
++++ b/drivers/misc/mediatek/video/mt6765/videox/primary_display.c
+@@ -481,11 +481,10 @@ enum mtkfb_power_mode primary_display_get_power_mode(void)
+ 
+ bool primary_is_aod_supported(void)
+ {
+-	if (disp_helper_get_option(DISP_OPT_AOD) &&
+-		!disp_lcm_is_video_mode(pgc->plcm))
+-		return 1;
+-
+-	return 0;
++	/* Kompakt: the nominal LCM is a video-mode nt35521 that is never driven,
++	 * so the stock check is always false and DOZE_SUSPEND never suspends.
++	 */
++	return 1;
+ }
+ 
+ /* LCM power state API */
+@@ -4925,6 +4924,17 @@ int primary_display_resume(void)
+ 	_primary_path_lock(__func__);
+ 	if (pgc->state == DISP_ALIVE) {
+ 		DISPCHECK("primary display path is already resume, skip\n");
++		/* Kompakt: still in AOD and the full resume is skipped, so leave low
++		 * power here. Only on FB_RESUME: a re-asserted DOZE is not an AOD exit.
++		 */
++		if (primary_display_get_power_mode_nolock() == FB_RESUME &&
++			primary_display_get_lcm_power_state_nolock() ==
++			LCM_ON_LOW_POWER) {
++			if (pgc->plcm && pgc->plcm->drv && pgc->plcm->drv->aod)
++				disp_lcm_aod(pgc->plcm, 0);
++			primary_display_set_lcm_power_state_nolock(LCM_ON);
++			DISPCHECK("kompakt-aod: forced LCM_ON on resume from DOZE\n");
++		}
+ 		goto done;
+ 	}
+ 	mmprofile_log_ex(ddp_mmp_get_events()->primary_resume,
+diff --git a/drivers/misc/mudita/battery_monitor/battery_monitor.c b/drivers/misc/mudita/battery_monitor/battery_monitor.c
+index 5b3829bdf100f091ba5087b0d407bbfabae47ac3..054012b864363e3084138d85a5cba0fb73adec40 100644
+--- a/drivers/misc/mudita/battery_monitor/battery_monitor.c
++++ b/drivers/misc/mudita/battery_monitor/battery_monitor.c
+@@ -35,6 +35,12 @@ static int charge_limit = 100;
+ static struct kobject *battery_monitor_kobj;
+ static struct kobject *hwks_on_boot_kobj;
+ 
++int battery_monitor_get_cycle_count(void)
++{
++    return cycle_count;
++}
++EXPORT_SYMBOL(battery_monitor_get_cycle_count);
++
+ static ssize_t hwks_on_boot_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+ {
+     return scnprintf(buf, BUF_SIZE, "%d", kill_switch_state_on_boot);
+diff --git a/drivers/misc/mudita/eink_loader/eink_hal.h b/drivers/misc/mudita/eink_loader/eink_hal.h
+index 262068203bd046af86924e2d48049ee1e75053c9..7aeb4156c625b95d978ce94b828634c2da918909 100644
+--- a/drivers/misc/mudita/eink_loader/eink_hal.h
++++ b/drivers/misc/mudita/eink_loader/eink_hal.h
+@@ -78,7 +78,12 @@ int eink_deinitHal(struct EinkHal** einkHalHndl);
+ int eink_powerUpSequence(struct EinkHal* const hw);
+ int eink_powerDownSequence(struct EinkHal* const hw);
+ 
++void eink_aod_exit_begin(void);
++void eink_aod_exit_end(void);
++
+ int eink_write(struct EinkHal* hw, void* buf, unsigned int size);
++int  eink_refresh_stats(char *buf, int n);
++void eink_refresh_stats_reset(void);
+ int eink_read(struct EinkHal* hw, void* buf, unsigned int size);
+ 
+ int eink_isReady(struct EinkHal* const hw);
+diff --git a/drivers/misc/mudita/eink_loader/eink_spi_hal.c b/drivers/misc/mudita/eink_loader/eink_spi_hal.c
+index 89b79b72c6c811eb3a8301e940403eda93c8b59b..bdcabc95554e9615184f0210b373ae2b513979fa 100644
+--- a/drivers/misc/mudita/eink_loader/eink_spi_hal.c
++++ b/drivers/misc/mudita/eink_loader/eink_spi_hal.c
+@@ -10,6 +10,11 @@
+ #include <linux/module.h>
+ #include <linux/moduleparam.h>
+ #include <linux/delay.h>
++#include <linux/math64.h>
++#include <linux/crc32.h>
++#include <linux/spinlock.h>
++#include <linux/workqueue.h>
++#include <linux/jiffies.h>
+ #include <linux/errno.h>
+ #include <linux/regulator/consumer.h>
+ #include <linux/power_supply.h>
+@@ -58,6 +63,790 @@ int getEinkHalDebugLogLevel(void)
+ }
+ EXPORT_SYMBOL(getEinkHalDebugLogLevel);
+ 
++/* Kompakt: log every SPI transfer to the panel, first TRACE_BYTES bytes each. */
++static int trace = 1;
++module_param(trace, int, 0644);
++MODULE_PARM_DESC(trace, "log every SPI transfer to and from the panel");
++
++#define TRACE_BYTES 32
++
++static void eink_trace(const char *dir, const void *buf, unsigned int size)
++{
++    unsigned int n = size < TRACE_BYTES ? size : TRACE_BYTES;
++    char hex[TRACE_BYTES * 3 + 1];
++    const unsigned char *p = buf;
++    unsigned int i;
++
++    if (!trace)
++        return;
++
++    for (i = 0; i < n; i++)
++        scnprintf(hex + i * 3, 4, "%02x ", p[i]);
++    hex[n ? n * 3 - 1 : 0] = '\0';
++
++    pr_info("einkspi %s len=%u %s%s\n", dir, size, hex,
++            size > n ? " ..." : "");
++}
++
++/*
++ * Kompakt: partial updates. Diff each frame against the last and send only
++ * what changed; partial=0 restores stock. See docs/E-inkdriver.md.
++ */
++#define EINK_W          800
++#define EINK_H          480
++#define CMD_WINDOW      0x83
++#define CMD_IMAGE       0x10
++#define CMD_IMAGE_ALT   0x13
++#define CMD_REFRESH     0x12
++#define CMD_POF         0x02
++#define CMD_PON         0x04
++#define CMD_CONFIG      0x07
++
++static int panel_on = 1;
++static int suppress_pof;
++static unsigned char conf_cmd[8];
++static unsigned int  conf_len;
++
++/* De-ghost flash (white, then black) on screen-off: run it every Nth sleep. */
++static int deghost_every = 8;
++module_param(deghost_every, int, 0644);
++MODULE_PARM_DESC(deghost_every, "run the screen-off de-ghost flash every Nth sleep; 1 = always");
++
++static unsigned int deghost_run;
++static int deghost_skip;
++
++static int partial = 1;
++module_param(partial, int, 0644);
++MODULE_PARM_DESC(partial, "send only changed rows instead of the whole panel");
++
++/*
++ * partial_max_pct: above this, a full update costs the same and settles better.
++ * partial_full_every: periodic full pass to clear partial-update residue.
++ */
++static int partial_max_pct = 25;
++module_param(partial_max_pct, int, 0644);
++MODULE_PARM_DESC(partial_max_pct, "above this %% of rows changed, send the full frame");
++
++static int partial_full_every = 24;
++module_param(partial_full_every, int, 0644);
++MODULE_PARM_DESC(partial_full_every, "force a full refresh after this many partial updates");
++
++static unsigned int partial_run;
++
++/* On a full-frame update, refresh only the band that changed; the panel is
++ * bistable, so undriven areas keep their ink. See docs/E-inkdriver.md.
++ */
++static int semi_partial = 1;
++module_param(semi_partial, int, 0644);
++MODULE_PARM_DESC(semi_partial, "on a full-frame update, refresh only the band that changed");
++
++static int semi_window = 1;
++module_param(semi_window, int, 0644);
++MODULE_PARM_DESC(semi_window, "re-send the 0x83 window before the narrowed refresh");
++
++/*
++ * Auto mode: fast waveform while the screen moves, quality once it settles.
++ * Mode changes run from a workqueue: detection runs inside eink_write on
++ * meink's thread, and applying a mode there would re-enter meink mid-SPI.
++ */
++static int auto_busy_pct = 25;
++module_param(auto_busy_pct, int, 0644);
++MODULE_PARM_DESC(auto_busy_pct, "%% of rows changed that counts as movement");
++
++/* At ~5 fps each extra frame here is ~200 ms of scrolling at quality. */
++static int auto_busy_frames = 1;
++module_param(auto_busy_frames, int, 0644);
++MODULE_PARM_DESC(auto_busy_frames, "consecutive moving frames before switching to fast");
++
++static int auto_idle_ms = 2000;
++module_param(auto_idle_ms, int, 0644);
++MODULE_PARM_DESC(auto_idle_ms, "quiet time before settling back to quality");
++
++/* Below this the screen counts as still (cursor, clock); between calm and
++ * busy the current mode is held.
++ */
++static int auto_calm_pct = 5;
++module_param(auto_calm_pct, int, 0644);
++MODULE_PARM_DESC(auto_calm_pct, "%% of rows below which the screen counts as still");
++
++/* Kompakt: time each refresh (0x12 to ready) and dump waveform tables in full. */
++static int measure = 1;
++module_param(measure, int, 0644);
++MODULE_PARM_DESC(measure, "time refreshes and dump waveform tables in full");
++
++static ktime_t refresh_at;
++static int     refresh_pending;
++static unsigned char last_mode;
++
++/* Last waveform table uploads (0x20..0x22), read back via refresh_time. */
++static u32 lut_crc[3];
++static u32 lut_len[3];
++static unsigned long lut_seen;
++
++static s64 rt_last_us, rt_min_us, rt_max_us, rt_total_us;
++static unsigned long rt_count;
++static DEFINE_SPINLOCK(rt_lock);
++
++static void eink_note_refresh(s64 us)
++{
++    unsigned long flags;
++
++    if (us <= 0)
++        return;
++    spin_lock_irqsave(&rt_lock, flags);
++    rt_last_us = us;
++    if (rt_count == 0 || us < rt_min_us)
++        rt_min_us = us;
++    if (us > rt_max_us)
++        rt_max_us = us;
++    rt_total_us += us;
++    rt_count++;
++    spin_unlock_irqrestore(&rt_lock, flags);
++}
++
++int eink_refresh_stats(char *buf, int n)
++{
++    unsigned long flags;
++    s64 last, mn, mx, total, avg;
++    unsigned long cnt;
++    unsigned char mode;
++
++    spin_lock_irqsave(&rt_lock, flags);
++    last = rt_last_us;
++    mn = rt_min_us;
++    mx = rt_max_us;
++    total = rt_total_us;
++    cnt = rt_count;
++    mode = last_mode;
++    spin_unlock_irqrestore(&rt_lock, flags);
++
++    if (cnt == 0)
++        return scnprintf(buf, n,
++            "count=0 luts=%lu lutc=%08x/%u lutd=%08x/%u lutr=%08x/%u\n",
++            lut_seen, lut_crc[0], lut_len[0], lut_crc[1], lut_len[1],
++            lut_crc[2], lut_len[2]);
++    avg = div64_s64(total, (s64)cnt);
++    return scnprintf(buf, n,
++        "last=%lld min=%lld avg=%lld max=%lld count=%lu mode=%02x "
++        "luts=%lu lutc=%08x/%u lutd=%08x/%u lutr=%08x/%u\n",
++        last, mn, avg, mx, cnt, mode,
++        lut_seen, lut_crc[0], lut_len[0], lut_crc[1], lut_len[1],
++        lut_crc[2], lut_len[2]);
++}
++EXPORT_SYMBOL(eink_refresh_stats);
++
++void eink_refresh_stats_reset(void)
++{
++    unsigned long flags;
++
++    spin_lock_irqsave(&rt_lock, flags);
++    rt_last_us = 0;
++    rt_min_us = 0;
++    rt_max_us = 0;
++    rt_total_us = 0;
++    rt_count = 0;
++    lut_crc[0] = 0; lut_crc[1] = 0; lut_crc[2] = 0;
++    lut_len[0] = 0; lut_len[1] = 0; lut_len[2] = 0;
++    lut_seen = 0;
++    spin_unlock_irqrestore(&rt_lock, flags);
++}
++EXPORT_SYMBOL(eink_refresh_stats_reset);
++
++static void eink_note_lut(const unsigned char *buf, unsigned int size)
++{
++    unsigned int idx = buf[0] - 0x20;
++    unsigned long flags;
++    u32 crc;
++
++    if (idx > 2)
++        return;
++    crc = crc32(0, buf + 1, size - 1);
++    spin_lock_irqsave(&rt_lock, flags);
++    lut_crc[idx] = crc;
++    lut_len[idx] = size - 1;
++    lut_seen++;
++    spin_unlock_irqrestore(&rt_lock, flags);
++}
++
++static void eink_dump_table(const unsigned char *buf, unsigned int size)
++{
++    char line[32 * 3 + 1];
++    unsigned int i, j, n;
++
++    pr_info("einktab cmd=%02x len=%u\n", buf[0], size);
++    for (i = 1; i < size; i += 32) {
++        n = (size - i) < 32 ? (size - i) : 32;
++        for (j = 0; j < n; j++)
++            scnprintf(line + j * 3, 4, "%02x ", buf[i + j]);
++        line[n * 3 - 1] = 0;
++        pr_info("einktab +%04u %s\n", i - 1, line);
++    }
++}
++
++void eink_waitForReady(struct EinkHal* const hw);
++
++static unsigned char *last_frame;   /* what the panel is actually showing */
++static unsigned char *pend_frame;   /* staged at 0x10, sent at 0x12 */
++static unsigned int   last_len;
++static unsigned int   pend_rb;
++static unsigned char  pend_depth;
++static int            pend_valid;
++static int            swallow_refresh;
++static int            force_full;
++
++/* band to refresh when a full frame goes out; staged at 0x10, sent at 0x12 */
++static unsigned int   semi_c0, semi_c1, semi_rb;
++static unsigned char  semi_depth;
++static int            semi_valid;
++
++/* Auto mode state. auto_apply lives in loader.c, which owns the meink handle. */
++extern void kompakt_request_repaint(void);
++
++static void (*auto_apply)(int moving);
++static unsigned int    auto_busy_run;
++static int             auto_moving;
++static int             auto_on;
++static struct work_struct       auto_fast_work;
++static struct delayed_work      auto_idle_work;
++
++static void eink_auto_fast_fn(struct work_struct *w)
++{
++    if (!auto_on || auto_moving)
++        return;
++    auto_moving = 1;
++    pr_info("einkauto: moving, switching to fast\n");
++    if (auto_apply)
++        auto_apply(1);
++}
++
++static void eink_auto_idle_fn(struct work_struct *w)
++{
++    if (!auto_on || !auto_moving)
++        return;
++    auto_moving = 0;
++    auto_busy_run = 0;
++    pr_info("einkauto: settled, back to quality\n");
++    if (auto_apply)
++        auto_apply(0);
++    /* The mode change paints nothing on its own; push the frame again. */
++    kompakt_request_repaint();
++}
++
++/*
++ * Per-frame movement from eink_partial_image. Only frames quieter than
++ * auto_calm_pct let the settle timer run down, so a clock cannot hold fast.
++ */
++static void eink_auto_note(unsigned int changed_cols, unsigned int rb)
++{
++    unsigned int pct100;
++
++    if (!auto_on || auto_busy_pct <= 0)
++        return;
++
++    pct100 = changed_cols * 100;
++
++    if (pct100 < (unsigned int)auto_calm_pct * rb) {
++        auto_busy_run = 0;               /* quiet: let it settle */
++        return;
++    }
++
++    mod_delayed_work(system_wq, &auto_idle_work,
++                     msecs_to_jiffies(auto_idle_ms));
++
++    if (pct100 < (unsigned int)auto_busy_pct * rb) {
++        auto_busy_run = 0;               /* active, but not fast worthy */
++        return;
++    }
++
++    auto_busy_run++;
++    if (!auto_moving && auto_busy_frames > 0 &&
++        auto_busy_run >= (unsigned int)auto_busy_frames)
++        schedule_work(&auto_fast_work);
++}
++
++/* An undiffable frame (depth change or new LUT) right after a mode switch;
++ * keep the settle timer from expiring mid-scroll.
++ */
++static void eink_auto_keepalive(void)
++{
++    if (!auto_on || !auto_moving)
++        return;
++    mod_delayed_work(system_wq, &auto_idle_work,
++                     msecs_to_jiffies(auto_idle_ms));
++}
++
++/* loader.c turns this on when the waveform is set to KAUTO, off for any other */
++void eink_auto_enable(int on, void (*apply)(int moving))
++{
++    auto_apply = apply;
++    auto_on = on;
++    auto_busy_run = 0;
++    if (!on) {
++        cancel_delayed_work_sync(&auto_idle_work);
++        cancel_work_sync(&auto_fast_work);
++        auto_moving = 0;
++    }
++}
++EXPORT_SYMBOL(eink_auto_enable);
++
++int eink_auto_state(void)
++{
++    return auto_on ? (auto_moving ? 2 : 1) : 0;
++}
++EXPORT_SYMBOL(eink_auto_state);
++
++/*
++ * Reset all partial-update state. A stale swallow_refresh would drop the next
++ * real refresh and the panel would never repaint.
++ */
++void eink_force_full(void)
++{
++    force_full = 1;
++    swallow_refresh = 0;
++    pend_valid = 0;
++    semi_valid = 0;
++    partial_run = 0;
++    last_len = 0;
++}
++EXPORT_SYMBOL(eink_force_full);
++
++/*
++ * Hold off meink's POF across eink_aod_func(0) on the wake path, where nothing
++ * powers the panel back up. The powerdown path keeps its POF.
++ */
++void eink_aod_exit_begin(void)
++{
++    suppress_pof = 1;
++}
++EXPORT_SYMBOL(eink_aod_exit_begin);
++
++void eink_aod_exit_end(void)
++{
++    suppress_pof = 0;
++}
++EXPORT_SYMBOL(eink_aod_exit_end);
++
++static unsigned int eink_row_bytes(unsigned char depth)
++{
++    return depth == 0x00 ? EINK_W / 8 : EINK_W / 2;
++}
++
++static void eink_put_rect(unsigned char *p, unsigned int x0, unsigned int y0,
++                          unsigned int w, unsigned int h)
++{
++    p[0] = (x0 >> 8) & 0xff; p[1] = x0 & 0xff;
++    p[2] = (y0 >> 8) & 0xff; p[3] = y0 & 0xff;
++    p[4] = (w  >> 8) & 0xff; p[5] = w  & 0xff;
++    p[6] = (h  >> 8) & 0xff; p[7] = h  & 0xff;
++}
++
++/*
++ * Kompakt: repaint only the rectangles that changed.
++ *
++ * Axes are swapped: one panel row (800 px) is one screen column. Bytes within
++ * a row (c0..c1) are screen Y; rows (y0..y1) are screen X. Getting the c axis
++ * wrong skews the image. See docs/E-inkdriver.md.
++ *
++ * Each rectangle costs a full waveform pass (~190 ms), so keep MAX_BOXES small.
++ */
++#define MAX_BOXES   2
++#define COL_GAP     8      /* unchanged bytes that still merge two bands */
++#define XALIGN      4      /* round a band out to this many bytes */
++#define ROW_SLACK   8      /* rows of margin left around a changed region */
++
++static unsigned char col_any[EINK_W / 2];   /* per byte-of-row: did it change */
++
++struct eink_box {
++    unsigned int c0, c1;    /* byte range inside a row  -> screen Y */
++    unsigned int y0, y1;    /* range of rows            -> screen X */
++};
++static struct eink_box boxes[MAX_BOXES];
++
++/* Rows of unchanged content that split one band into separate rectangles. */
++#define ROW_GAP     24
++
++/* Which rows changed inside the band being examined, and the split result. */
++static unsigned char   row_any[EINK_H];
++static struct eink_box obx[MAX_BOXES];
++static unsigned int    nboxes;
++
++/* Send one rectangle: window, pixels, refresh. The waits are required: the
++ * controller drops SPI writes that arrive during a waveform pass.
++ */
++static int eink_send_box(struct EinkHal *hw, struct spi_device *spi,
++                         const unsigned char *px, unsigned int rb,
++                         const struct eink_box *bx, unsigned char depth,
++                         unsigned char mode)
++{
++    unsigned int bw   = bx->c1 - bx->c0 + 1;
++    unsigned int rows = bx->y1 - bx->y0 + 1;
++    unsigned int ppb  = (depth == 0x00) ? 8 : 2;      /* pixels per byte */
++    unsigned int x0   = bx->c0 * ppb;                 /* -> top of the band */
++    unsigned int w    = bw * ppb;                     /* -> height of band */
++    unsigned char hdr[10];
++    unsigned char *out;
++    unsigned int i;
++    int rc;
++
++    hdr[0] = CMD_WINDOW;
++    eink_put_rect(hdr + 1, x0, bx->y0, w, rows);
++    eink_waitForReady(hw);
++    if (spi_write(spi, hdr, 9))
++        return -1;
++
++    out = kmalloc(bw * rows + 2, GFP_KERNEL);
++    if (out == NULL)
++        return -1;
++    out[0] = CMD_IMAGE;
++    out[1] = depth;
++    for (i = 0; i < rows; i++)
++        memcpy(out + 2 + i * bw, px + (bx->y0 + i) * rb + bx->c0, bw);
++    eink_waitForReady(hw);
++    rc = spi_write(spi, out, bw * rows + 2);
++    kfree(out);
++    if (rc)
++        return -1;
++
++    /* the refresh must carry the same rectangle */
++    hdr[0] = CMD_REFRESH;
++    hdr[1] = mode;
++    eink_put_rect(hdr + 2, x0, bx->y0, w, rows);
++    eink_waitForReady(hw);
++    return spi_write(spi, hdr, 10) ? -1 : 0;
++}
++
++/* Stage the bbox of changed bytes so the refresh after a full frame can skip
++ * the rest. Needs col_any from the diff.
++ */
++static void eink_semi_stage(unsigned int rb, unsigned char depth)
++{
++    unsigned int j, c0 = rb, c1 = 0;
++
++    semi_valid = 0;
++    if (!semi_partial)
++        return;
++
++    for (j = 0; j < rb; j++)
++        if (col_any[j]) {
++            if (j < c0)
++                c0 = j;
++            c1 = j;
++        }
++    if (c0 > c1)
++        return;
++
++    c0 = (c0 / XALIGN) * XALIGN;
++    c1 = ((c1 / XALIGN) + 1) * XALIGN - 1;
++    if (c1 >= rb)
++        c1 = rb - 1;
++    if (c0 + (rb - 1 - c1) < XALIGN)     /* too little excluded to bother */
++        return;
++
++    semi_c0 = c0;
++    semi_c1 = c1;
++    semi_rb = rb;
++    semi_depth = depth;
++    semi_valid = 1;
++}
++
++/* Refresh the staged band only; the full frame's pixels already went out. */
++static int eink_semi_refresh(struct EinkHal *hw, struct spi_device *spi,
++                             unsigned char mode)
++{
++    unsigned int ppb = (semi_depth == 0x00) ? 8 : 2;
++    unsigned int x0  = semi_c0 * ppb;
++    unsigned int w   = (semi_c1 - semi_c0 + 1) * ppb;
++    unsigned char hdr[10];
++
++    if (semi_window) {
++        hdr[0] = CMD_WINDOW;
++        eink_put_rect(hdr + 1, x0, 0, w, EINK_H);
++        eink_waitForReady(hw);
++        if (spi_write(spi, hdr, 9))
++            return -1;
++    }
++
++    hdr[0] = CMD_REFRESH;
++    hdr[1] = mode;
++    eink_put_rect(hdr + 2, x0, 0, w, EINK_H);
++    eink_waitForReady(hw);
++    if (spi_write(spi, hdr, 10) == 0)
++        return 0;
++
++    /* put the window back so the caller's own full refresh still works */
++    if (semi_window) {
++        hdr[0] = CMD_WINDOW;
++        eink_put_rect(hdr + 1, 0, 0, EINK_W, EINK_H);
++        eink_waitForReady(hw);
++        spi_write(spi, hdr, 9);
++    }
++    return -1;
++}
++
++/* Image command: diff and stage, but do not send. The waveform mode only
++ * arrives with the 0x12 that follows.
++ */
++static int eink_partial_image(struct EinkHal *hw, struct spi_device *spi,
++                              const unsigned char *buf, unsigned int size)
++{
++    const unsigned char depth = buf[1];
++    const unsigned int  rb    = eink_row_bytes(depth);
++    const unsigned char *px   = buf + 2;
++    const unsigned int  pxlen = size - 2;
++    unsigned int i, j, k, changed_cols = 0;
++    int run = -1;
++
++    pend_valid = 0;
++    swallow_refresh = 0;
++    semi_valid = 0;
++
++    if (!partial || rb == 0 || rb > sizeof(col_any) || pxlen != rb * EINK_H)
++        return 0;
++
++    if (last_frame == NULL || pend_frame == NULL || last_len != pxlen) {
++        kfree(last_frame);
++        kfree(pend_frame);
++        last_frame = kmalloc(pxlen, GFP_KERNEL);
++        pend_frame = kmalloc(pxlen, GFP_KERNEL);
++        if (last_frame == NULL || pend_frame == NULL) {
++            kfree(last_frame);
++            kfree(pend_frame);
++            last_frame = NULL;
++            pend_frame = NULL;
++            last_len = 0;
++            return 0;
++        }
++        memcpy(last_frame, px, pxlen);
++        last_len = pxlen;
++        eink_auto_keepalive();           /* depth change: auto just switched */
++        return 0;                        /* first frame goes out whole */
++    }
++
++    if (force_full) {                    /* new waveform: re-render in full */
++        force_full = 0;
++        partial_run = 0;
++        memcpy(last_frame, px, pxlen);
++        eink_auto_keepalive();           /* the LUT auto just uploaded */
++        return 0;
++    }
++
++    /* which byte offsets within a row changed, anywhere down the panel */
++    memset(col_any, 0, rb);
++    for (i = 0; i < EINK_H; i++) {
++        const unsigned char *a = last_frame + i * rb;
++        const unsigned char *b = px + i * rb;
++
++        for (j = 0; j < rb; j++)
++            if (a[j] != b[j])
++                col_any[j] = 1;
++    }
++    for (j = 0; j < rb; j++)
++        if (col_any[j]) changed_cols++;
++
++    eink_auto_note(changed_cols, rb);
++
++    if (changed_cols == 0) {
++        swallow_refresh = 1;             /* drop the refresh that follows too */
++        return 1;
++    }
++    if (partial_max_pct > 0 &&
++        changed_cols * 100 >= (unsigned int)partial_max_pct * rb) {
++        partial_run = 0;                 /* a scroll: everything moved */
++        eink_semi_stage(rb, depth);
++        memcpy(last_frame, px, pxlen);
++        return 0;
++    }
++    if (partial_full_every > 0 &&
++        ++partial_run >= (unsigned int)partial_full_every) {
++        partial_run = 0;
++        memcpy(last_frame, px, pxlen);
++        pr_info("einkpart: full refresh to clear residue\n");
++        return 0;
++    }
++
++    /* group changed offsets into bands, merging gaps shorter than COL_GAP */
++    nboxes = 0;
++    for (j = 0; j < rb; j++) {
++        if (col_any[j]) {
++            if (run < 0) {
++                if (nboxes == MAX_BOXES) { nboxes = 0; break; }
++                run = nboxes++;
++                boxes[run].c0 = j;
++            }
++            boxes[run].c1 = j;
++        } else if (run >= 0) {
++            for (k = 1; k <= COL_GAP && j + k < rb; k++)
++                if (col_any[j + k]) break;
++            if (k > COL_GAP)
++                run = -1;                /* gap wide enough to split here */
++        }
++    }
++    if (nboxes == 0) {                   /* too fragmented: one full update */
++        eink_semi_stage(rb, depth);
++        memcpy(last_frame, px, pxlen);
++        return 0;
++    }
++
++    /* round each band out on the byte axis, then merge any that now touch */
++    for (i = 0; i < nboxes; i++) {
++        boxes[i].c0 = (boxes[i].c0 / XALIGN) * XALIGN;
++        boxes[i].c1 = ((boxes[i].c1 / XALIGN) + 1) * XALIGN - 1;
++        if (boxes[i].c1 >= rb)
++            boxes[i].c1 = rb - 1;
++    }
++    for (i = 1; i < nboxes; ) {
++        if (boxes[i].c0 <= boxes[i - 1].c1 + 1) {
++            if (boxes[i].c1 > boxes[i - 1].c1)
++                boxes[i - 1].c1 = boxes[i].c1;
++            for (j = i; j + 1 < nboxes; j++)
++                boxes[j] = boxes[j + 1];
++            nboxes--;
++        } else {
++            i++;
++        }
++    }
++
++    /*
++     * Split each band into runs of changed rows, one rectangle per run, so a
++     * seekbar changing at both ends of a strip does not repaint all of it.
++     * Stays within MAX_BOXES; a band that would exceed it keeps one span.
++     */
++    {
++    unsigned int obn = 0;
++
++    for (i = 0; i < nboxes && obn < MAX_BOXES; i++) {
++        unsigned int c0 = boxes[i].c0, c1 = boxes[i].c1;
++        unsigned int lo = EINK_H, hi = 0;
++        unsigned int runs = 0;
++
++        memset(row_any, 0, EINK_H);
++        for (j = 0; j < EINK_H; j++) {
++            const unsigned char *a = last_frame + j * rb;
++            const unsigned char *b = px + j * rb;
++
++            for (k = c0; k <= c1; k++) {
++                if (a[k] != b[k]) {
++                    row_any[j] = 1;
++                    if (j < lo) lo = j;
++                    hi = j;
++                    break;
++                }
++            }
++        }
++        if (lo > hi) {                   /* cannot happen, but be safe */
++            obx[obn].c0 = c0;
++            obx[obn].c1 = c1;
++            obx[obn].y0 = 0;
++            obx[obn].y1 = EINK_H - 1;
++            obn++;
++            continue;
++        }
++
++        /* close gaps shorter than ROW_GAP, so a run is simply contiguous */
++        j = lo;
++        while (j <= hi) {
++            if (row_any[j]) { j++; continue; }
++            k = j;
++            while (k <= hi && !row_any[k]) k++;
++            if (k - j < ROW_GAP) {
++                for (; j < k; j++)
++                    row_any[j] = 1;
++            } else {
++                j = k;
++            }
++        }
++
++        for (j = lo; j <= hi; j++)
++            if (row_any[j] && (j == lo || !row_any[j - 1]))
++                runs++;
++
++        if (runs == 0 || obn + runs > MAX_BOXES) {
++            /* no budget to split it: one span, exactly as before */
++            obx[obn].c0 = c0;
++            obx[obn].c1 = c1;
++            obx[obn].y0 = (lo > ROW_SLACK) ? lo - ROW_SLACK : 0;
++            obx[obn].y1 = (hi + ROW_SLACK < EINK_H) ? hi + ROW_SLACK : EINK_H - 1;
++            obn++;
++            continue;
++        }
++
++        for (j = lo; j <= hi; j++) {
++            if (!row_any[j])
++                continue;
++            k = j;
++            while (k <= hi && row_any[k])
++                k++;
++            obx[obn].c0 = c0;
++            obx[obn].c1 = c1;
++            obx[obn].y0 = (j > ROW_SLACK) ? j - ROW_SLACK : 0;
++            obx[obn].y1 = (k - 1 + ROW_SLACK < EINK_H) ? k - 1 + ROW_SLACK
++                                                       : EINK_H - 1;
++            obn++;
++            j = k;
++        }
++    }
++
++    for (i = 0; i < obn; i++)
++        boxes[i] = obx[i];
++    nboxes = obn;
++    }
++
++    memcpy(pend_frame, px, pxlen);
++    pend_rb = rb;
++    pend_depth = depth;
++    pend_valid = 1;
++    return 1;                            /* swallow: we send it at the 0x12 */
++}
++
++/*
++ * Refresh command: send the staged rectangles. last_frame advances only for
++ * rectangles that went out, so a failed one is retried on the next frame.
++ */
++static int eink_partial_refresh(struct EinkHal *hw, struct spi_device *spi,
++                                const unsigned char *buf)
++{
++    const unsigned char mode = buf[1];
++    unsigned int i, r, sent = 0;
++
++    if (swallow_refresh) {
++        swallow_refresh = 0;
++        return 1;
++    }
++    if (!pend_valid) {
++        if (semi_valid) {
++            semi_valid = 0;
++            if (eink_semi_refresh(hw, spi, mode) == 0) {
++                pr_info("einkpart: semi refresh mode=%02x bytes %u..%u of %u\n",
++                        mode, semi_c0, semi_c1, semi_rb);
++                return 1;
++            }
++            pr_warn("einkpart: semi refresh failed; full refresh follows\n");
++        }
++        return 0;
++    }
++    pend_valid = 0;
++
++    for (i = 0; i < nboxes; i++) {
++        unsigned int c0 = boxes[i].c0;
++        unsigned int bw = boxes[i].c1 - c0 + 1;
++
++        if (eink_send_box(hw, spi, pend_frame, pend_rb, &boxes[i],
++                          pend_depth, mode)) {
++            pr_warn("einkpart: rect %u of %u failed; left stale so the next "
++                    "frame retries it\n", i, nboxes);
++            break;
++        }
++        for (r = boxes[i].y0; r <= boxes[i].y1; r++)
++            memcpy(last_frame + r * pend_rb + c0,
++                   pend_frame + r * pend_rb + c0, bw);
++        sent += bw * (boxes[i].y1 - boxes[i].y0 + 1);
++    }
++
++    pr_info("einkpart: %u rect(s) mode=%02x, %u B instead of %u\n",
++            nboxes, mode, sent, pend_rb * EINK_H);
++    return 1;
++}
++
+ int eink_registerCallbackTable(const EinkCallbackTable_t* cbTable)
+ {
+     if (cbTable == NULL) {
+@@ -177,6 +966,8 @@ int eink_powerUpSequence(struct EinkHal* const hw)
+         pr_err("%s: Invalid GPIO pins\n", __func__);
+         return -EINVAL;
+     }
++    if (trace)
++        pr_info("einkspi power-up: 3v3 on, reset low, reset high\n");
+     msleep(10);
+     gpio_set_value(hw->gpio.pin_3v3_num, 1);
+     msleep(50);
+@@ -185,6 +976,8 @@ int eink_powerUpSequence(struct EinkHal* const hw)
+     gpio_set_value(hw->gpio.rst_pin_num, 1);
+     msleep(30);
+ 
++    panel_on = 1;
++    eink_force_full();          /* reset cleared the controller; our cache is stale */
+     return 0;
+ }
+ EXPORT_SYMBOL(eink_powerUpSequence);
+@@ -201,11 +994,59 @@ int eink_powerDownSequence(struct EinkHal* const hw)
+         return -EINVAL;
+     }
+ 
++    eink_force_full();          /* whatever is on the glass outlives the rail */
++    panel_on = 0;
+     gpio_set_value(hw->gpio.pin_3v3_num, 0);
+     return 0;
+ }
+ EXPORT_SYMBOL(eink_powerDownSequence);
+ 
++/*
++ * Painting with the rail down: send PON and meink's last config word directly.
++ * Not through eink_write: an unpowered panel never raises BUSY.
++ */
++static void eink_repower(struct EinkHal *hw, struct spi_device *spi)
++{
++    unsigned char pon = CMD_PON;
++
++    spi_write(spi, &pon, 1);
++    msleep(90);
++    if (conf_len)
++        spi_write(spi, conf_cmd, conf_len);
++    panel_on = 1;
++    eink_force_full();
++    pr_info("einkspi: panel rail was down under a paint; PON re-sent\n");
++}
++
++/* Detect a screen-off de-ghost frame: full 4bpp, uniform white or black.
++ * The white frame decides whether the pair is skipped.
++ */
++static int eink_is_deghost(const unsigned char *b, unsigned int size)
++{
++    unsigned int i;
++    unsigned char fill;
++
++    if (deghost_every <= 1)
++        return 0;
++    if (size != 2 + EINK_W * EINK_H / 2 || b[1] != 0x03)
++        return 0;
++    fill = b[2];
++    if (fill != 0x00 && fill != 0xff)
++        return 0;
++    for (i = 3; i < size; i++)
++        if (b[i] != fill)
++            return 0;
++
++    if (fill == 0xff) {
++        deghost_run++;
++        deghost_skip = (deghost_run % (unsigned int)deghost_every) != 0;
++        if (deghost_skip)
++            pr_info("einkpart: de-ghost flash skipped (%u/%d)\n",
++                    deghost_run % (unsigned int)deghost_every, deghost_every);
++    }
++    return deghost_skip;
++}
++
+ static ktime_t gTestLastStep = 0;
+ int eink_write(struct EinkHal* hw, void* buf, unsigned int size)
+ {
+@@ -230,6 +1071,25 @@ int eink_write(struct EinkHal* hw, void* buf, unsigned int size)
+         dev_err(&spi->dev, "spi setup failed %d", retVal);
+         return retVal;
+     }
++    {
++        const unsigned char *b = buf;
++
++        if (size == 1 && b[0] == CMD_POF) {
++            if (suppress_pof) {
++                pr_info("einkspi: POF held off across the AOD exit\n");
++                return 0;
++            }
++            panel_on = 0;
++        } else if (size == 1 && b[0] == CMD_PON) {
++            panel_on = 1;
++        } else if (size > 1 && size <= sizeof(conf_cmd) && b[0] == CMD_CONFIG) {
++            memcpy(conf_cmd, b, size);
++            conf_len = size;
++        } else if (!panel_on && (b[0] == CMD_WINDOW || b[0] == CMD_IMAGE ||
++                                 b[0] == CMD_IMAGE_ALT || b[0] == CMD_REFRESH)) {
++            eink_repower(hw, spi);
++        }
++    }
+     gTestLastStep = ktime_get();
+     eink_waitForReady(hw);
+     if (dbglogLevel != 0)
+@@ -238,6 +1098,46 @@ int eink_write(struct EinkHal* hw, void* buf, unsigned int size)
+         pr_info("LCD busy time [%lld]ms\n", (long long)ktime_to_ms(nowtime - gTestLastStep));
+     }
+ 
++    eink_trace("w", buf, size);
++    {
++        const unsigned char *b = buf;
++
++        if (size > 8 && (b[0] == 0x20 || b[0] == 0x21 || b[0] == 0x22)) {
++            eink_note_lut(b, size);
++            if (measure)
++                eink_dump_table(b, size);
++        }
++
++        if (size == 10 && b[0] == CMD_REFRESH) {
++            refresh_at = ktime_get();
++            refresh_pending = 1;
++            last_mode = b[1];
++        }
++
++        if (size > 8 && (b[0] == 0x20 || b[0] == 0x21 || b[0] == 0x22))
++            force_full = 1;              /* new waveform: re-render in full */
++
++        if (size > 2 && (b[0] == CMD_IMAGE || b[0] == CMD_IMAGE_ALT) &&
++            eink_is_deghost(b, size)) {
++            swallow_refresh = 1;
++            pend_valid = 0;
++            semi_valid = 0;
++            gTestLastStep = ktime_get();
++            return 0;
++        }
++
++        if (size > 2 && (b[0] == CMD_IMAGE || b[0] == CMD_IMAGE_ALT)) {
++            if (eink_partial_image(hw, spi, b, size)) {
++                gTestLastStep = ktime_get();
++                return 0;
++            }
++        } else if (size == 10 && b[0] == CMD_REFRESH) {
++            if (eink_partial_refresh(hw, spi, b)) {
++                gTestLastStep = ktime_get();
++                return 0;
++            }
++        }
++    }
+     gTestLastStep = ktime_get();
+     retVal = spi_write(spi, buf, size);
+     if (dbglogLevel != 0)
+@@ -275,6 +1175,8 @@ int eink_read(struct EinkHal* hw, void* buf, unsigned int size)
+ 
+     eink_waitForReady(hw);
+     retVal = spi_read(spi, buf, size);
++    if (retVal >= 0)
++        eink_trace("r", buf, size);
+     return retVal;
+ }
+ EXPORT_SYMBOL(eink_read);
+@@ -289,6 +1191,18 @@ int eink_isReady(struct EinkHal* const hw)
+ }
+ EXPORT_SYMBOL(eink_isReady);
+ 
++static void eink_measure_done(void)
++{
++    if (refresh_pending) {
++        s64 us = ktime_to_us(ktime_sub(ktime_get(), refresh_at));
++
++        eink_note_refresh(us);
++        if (measure)
++            pr_info("einktime mode=%02x refresh=%lld us\n", last_mode, us);
++        refresh_pending = 0;
++    }
++}
++
+ void eink_waitForReady(struct EinkHal* const hw)
+ {
+     int firstWait = 1;
+@@ -301,6 +1215,17 @@ void eink_waitForReady(struct EinkHal* const hw)
+         return;
+     }
+ 
++    if (refresh_pending) {
++        s64 us = ktime_to_us(ktime_sub(ktime_get(), refresh_at));
++
++        if (eink_isReady(hw)) {
++            eink_note_refresh(us);
++            if (measure)
++                pr_info("einktime mode=%02x refresh=%lld us (already ready)\n",
++                        last_mode, us);
++            refresh_pending = 0;
++        }
++    }
+     while((ready_status = eink_isReady(hw)) == 0)
+     {
+         if (firstWait)
+@@ -352,15 +1277,31 @@ int eink_get_battery_capacity(void)
+ }
+ EXPORT_SYMBOL(eink_get_battery_capacity);
+ 
++extern void register_eink_force_full_func(void (*func));
++extern void register_eink_aod_exit_funcs(void (*begin)(void), void (*end)(void));
++
+ static int __init meink_hal_init(void)
+ {
+     int ret = 0;
+ 
++    register_eink_force_full_func(eink_force_full);
++    register_eink_aod_exit_funcs(eink_aod_exit_begin, eink_aod_exit_end);
++    INIT_WORK(&auto_fast_work, eink_auto_fast_fn);
++    INIT_DELAYED_WORK(&auto_idle_work, eink_auto_idle_fn);
++
+     return ret;
+ }
+ 
+ static void __exit meink_hal_exit(void)
+ {
++    auto_on = 0;
++    cancel_delayed_work_sync(&auto_idle_work);
++    cancel_work_sync(&auto_fast_work);
++    kfree(last_frame);
++    kfree(pend_frame);
++    last_frame = NULL;
++    pend_frame = NULL;
++    last_len = 0;
+ }
+ 
+ module_init(meink_hal_init);
+diff --git a/drivers/misc/mudita/eink_loader/loader.c b/drivers/misc/mudita/eink_loader/loader.c
+index cbe1e0d16a2e84c62c0be1988333375bd591e1ee..0da8fa6c7c70159c1eef4a8e962b5103eae4b29f 100644
+--- a/drivers/misc/mudita/eink_loader/loader.c
++++ b/drivers/misc/mudita/eink_loader/loader.c
+@@ -15,6 +15,14 @@
+ #include <linux/platform_device.h>
+ #include <linux/spi/spi.h>
+ #include <linux/err.h>
++#include <linux/atomic.h>
++#include <linux/fb.h>
++#include <linux/mm.h>
++#include <linux/mutex.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#include <linux/vmalloc.h>
++#include <linux/reboot.h>
+ 
+ MODULE_DESCRIPTION("E-Ink driver loader");
+ MODULE_LICENSE("GPL");
+@@ -29,6 +37,15 @@ do {    if (x) break;                                                   \
+ /* Helper to get Eink API via eink_getCallback */
+ #define EINK_CB eink_getCallback()
+ 
++/*
++ * Auto mode, selected by writing this name to waveform_mode. Stock meink does
++ * not know it, so the read-back keeps the old mode. See docs/E-inkdriver.md.
++ */
++#define KOMPAKT_AUTO_NAME "KAUTO"
++
++extern void eink_auto_enable(int on, void (*apply)(int moving));
++extern int  eink_auto_state(void);
++
+ /* Replace all Eink* calls with EINK_CB->* */
+ #define EinkInit                EINK_CB->init
+ #define EinkDeinit              EINK_CB->deinit
+@@ -120,12 +137,42 @@ static ssize_t manualMode_store(struct device *dev,
+ }
+ 
+ 
++/* Fast and quality states for auto mode. Gamma, contrast and brightness are
++ * left as the user set them.
++ */
++static void kompakt_auto_apply(int moving)
++{
++    const EinkCallbackTable_t *cb = eink_getCallback();
++
++    if (cb == NULL || g_einkData.einkDrv == 0)
++        return;
++    if (!cb->setWaveformType || !cb->setBpp || !cb->setDitheringType ||
++        !cb->setDitheringParameter)
++        return;
++
++    if (moving) {
++        EinkSetWaveformType(g_einkData.einkDrv, kEinkWaveformA2);
++        EinkSetBpp(g_einkData.einkDrv, 1);
++        EinkSetDitheringParameter(g_einkData.einkDrv, 160);
++        EinkSetDitheringType(g_einkData.einkDrv,
++                             kEinkDitheringTypeFloydSteinbergOpt1);
++    } else {
++        EinkSetWaveformType(g_einkData.einkDrv, kEinkWaveformGL16);
++        EinkSetBpp(g_einkData.einkDrv, 4);
++        EinkSetDitheringType(g_einkData.einkDrv,
++                             kEinkDitheringTypeNotSpecified);
++    }
++}
++
+ static ssize_t waveform_type_show(struct device *dev,
+ 				 struct device_attribute *attr,
+ 				 char *buf)
+ {
+     enum EInkWaveformType type;
+ 
++    if (eink_auto_state())
++        return snprintf(buf, PAGE_SIZE, "%s\n", KOMPAKT_AUTO_NAME);
++
+     EinkGetWaveformMode(g_einkData.einkDrv, &type);
+ 	return snprintf(buf, PAGE_SIZE, "%s\n", EinkGetWaveformModeName(type));
+ }
+@@ -147,6 +194,15 @@ static ssize_t waveform_type_store(struct device *dev,
+         typeName[sizeof(typeName) - 1] = '\0';
+     }
+         
++    if (strcmp(typeName, KOMPAKT_AUTO_NAME) == 0)
++    {
++        eink_auto_enable(1, kompakt_auto_apply);
++        kompakt_auto_apply(0);          /* start settled */
++        pr_info("einkauto: enabled\n");
++        return count;
++    }
++    eink_auto_enable(0, NULL);          /* any explicit mode turns auto off */
++
+     type = EinkDecodeWaveformModeName(typeName);
+     if (type != kEinkWaveformInvalid)
+     {
+@@ -514,6 +570,237 @@ static ssize_t temperature_offset_store(struct device *dev,
+     return count;
+ }
+ 
++static ssize_t refresh_time_show(struct device *dev,
++                    struct device_attribute *attr, char *buf)
++{
++    return eink_refresh_stats(buf, PAGE_SIZE);
++}
++
++static ssize_t refresh_time_store(struct device *dev,
++                    struct device_attribute *attr,
++                    const char *buf, size_t count)
++{
++    eink_refresh_stats_reset();
++    return count;
++}
++
++/*
++ * Kompakt: the sleep screen. sleep_image replaces meink's
++ * cImageMuditaLockScreen_map; a write takes effect only once all
++ * SLEEPIMG_BYTES arrive in order from offset 0. sleep_image_stock reads
++ * Mudita's original. Keep sleep_image a prefix of sleep_image_stock: one
++ * genfscon line labels both. See docs/Images.md.
++ */
++#define SLEEPIMG_MODULE "meink"
++#define SLEEPIMG_SYMBOL "cImageMuditaLockScreen_map"
++#define SLEEPIMG_BYTES  (480 * 800 * 4)
++
++static DEFINE_MUTEX(sleepimg_mutex);
++static u8 *sleepimg_stage;
++static size_t sleepimg_staged;
++static u8 *sleepimg_orig;
++
++/* A meink symbol at least min_size long inside its core, or 0.
++ * Caller holds a reference.
++ */
++static unsigned long meink_symbol(struct module *mod, const char *name,
++                                  unsigned long min_size)
++{
++    struct mod_kallsyms *ks;
++    unsigned long addr = 0;
++    unsigned int i;
++
++    preempt_disable();
++    ks = rcu_dereference_sched(mod->kallsyms);
++    for (i = 0; i < ks->num_symtab; i++) {
++        const Elf_Sym *sym = &ks->symtab[i];
++
++        if (sym->st_size < min_size || strcmp(ks->strtab + sym->st_name, name))
++            continue;
++        if (within_module_core(sym->st_value, mod) &&
++            within_module_core(sym->st_value + min_size - 1, mod))
++            addr = sym->st_value;
++        break;
++    }
++    preempt_enable();
++    return addr;
++}
++
++/* meink, pinned until the caller's module_put, or NULL. */
++static struct module *meink_get(void)
++{
++    struct module *mod;
++
++    mutex_lock(&module_mutex);
++    mod = find_module(SLEEPIMG_MODULE);
++    if (mod && (mod->state != MODULE_STATE_LIVE || !try_module_get(mod)))
++        mod = NULL;
++    mutex_unlock(&module_mutex);
++    return mod;
++}
++
++/* The live array, with meink pinned until the caller's module_put. */
++static u8 *sleepimg_find(struct module **owner)
++{
++    struct module *mod;
++    unsigned long addr = 0;
++
++    *owner = NULL;
++    mod = meink_get();
++    if (mod) {
++        addr = meink_symbol(mod, SLEEPIMG_SYMBOL, SLEEPIMG_BYTES);
++        if (addr)
++            *owner = mod;
++        else
++            module_put(mod);
++    }
++
++    /* Ratelimited: a read arrives a page at a time. */
++    if (!addr)
++        pr_err_ratelimited("kompakt-sleepimg: %s not found in %s\n",
++                           SLEEPIMG_SYMBOL, SLEEPIMG_MODULE);
++    return (u8 *)addr;
++}
++
++/* Copy into read-only module memory through a writable alias of its pages. */
++static int sleepimg_poke(u8 *dst, const u8 *src, size_t len)
++{
++    unsigned long base = (unsigned long)dst & PAGE_MASK;
++    size_t off = (unsigned long)dst - base;
++    unsigned int n = DIV_ROUND_UP(off + len, PAGE_SIZE);
++    struct page **pages;
++    unsigned int i;
++    u8 *alias;
++    int ret = 0;
++
++    pages = kmalloc_array(n, sizeof(*pages), GFP_KERNEL);
++    if (!pages)
++        return -ENOMEM;
++    for (i = 0; i < n; i++) {
++        pages[i] = vmalloc_to_page((void *)(base + i * PAGE_SIZE));
++        if (!pages[i]) {
++            ret = -EFAULT;
++            goto out;
++        }
++    }
++    alias = vmap(pages, n, VM_MAP, PAGE_KERNEL);
++    if (!alias) {
++        ret = -ENOMEM;
++        goto out;
++    }
++    /* Prove the alias shows the target before writing anything through it. */
++    if (memcmp(alias + off, dst, 64)) {
++        pr_err("kompakt-sleepimg: alias does not map the array\n");
++        ret = -EFAULT;
++    } else {
++        memcpy(alias + off, src, len);
++    }
++    vunmap(alias);
++out:
++    kfree(pages);
++    return ret;
++}
++
++static ssize_t sleep_image_read(struct file *filp, struct kobject *kobj,
++                                struct bin_attribute *attr, char *buf,
++                                loff_t off, size_t count)
++{
++    struct module *owner;
++    u8 *img;
++
++    if (off >= SLEEPIMG_BYTES)
++        return 0;
++    count = min_t(size_t, count, SLEEPIMG_BYTES - off);
++    img = sleepimg_find(&owner);
++    if (!img)
++        return -ENODEV;
++    memcpy(buf, img + off, count);
++    module_put(owner);
++    return count;
++}
++
++static ssize_t sleep_image_write(struct file *filp, struct kobject *kobj,
++                                 struct bin_attribute *attr, char *buf,
++                                 loff_t off, size_t count)
++{
++    struct module *owner;
++    ssize_t ret = count;
++    u8 *img;
++    int err;
++
++    if (off >= SLEEPIMG_BYTES || count > SLEEPIMG_BYTES - off)
++        return -EFBIG;
++
++    mutex_lock(&sleepimg_mutex);
++    /* Offset 0 starts a new picture; anything out of order is refused. */
++    if (off == 0)
++        sleepimg_staged = 0;
++    if (off != sleepimg_staged) {
++        ret = -EINVAL;
++        goto out;
++    }
++    if (!sleepimg_stage) {
++        sleepimg_stage = vmalloc(SLEEPIMG_BYTES);
++        if (!sleepimg_stage) {
++            ret = -ENOMEM;
++            goto out;
++        }
++    }
++    memcpy(sleepimg_stage + off, buf, count);
++    sleepimg_staged += count;
++    if (sleepimg_staged < SLEEPIMG_BYTES)
++        goto out;
++
++    img = sleepimg_find(&owner);
++    if (!img) {
++        ret = -ENODEV;
++    } else {
++        /* Nothing has written the array yet this boot, so it is Mudita's. */
++        if (!sleepimg_orig) {
++            sleepimg_orig = vmalloc(SLEEPIMG_BYTES);
++            if (sleepimg_orig)
++                memcpy(sleepimg_orig, img, SLEEPIMG_BYTES);
++        }
++        err = sleepimg_orig ? sleepimg_poke(img, sleepimg_stage, SLEEPIMG_BYTES)
++                            : -ENOMEM;
++        module_put(owner);
++        if (err)
++            ret = err;
++        else
++            pr_info("kompakt-sleepimg: sleep screen replaced\n");
++    }
++    vfree(sleepimg_stage);
++    sleepimg_stage = NULL;
++    sleepimg_staged = 0;
++out:
++    mutex_unlock(&sleepimg_mutex);
++    return ret;
++}
++
++static ssize_t sleep_image_stock_read(struct file *filp, struct kobject *kobj,
++                                      struct bin_attribute *attr, char *buf,
++                                      loff_t off, size_t count)
++{
++    ssize_t ret;
++
++    if (off >= SLEEPIMG_BYTES)
++        return 0;
++    count = min_t(size_t, count, SLEEPIMG_BYTES - off);
++    mutex_lock(&sleepimg_mutex);
++    if (sleepimg_orig) {
++        memcpy(buf, sleepimg_orig + off, count);
++        ret = count;
++    } else {
++        ret = sleep_image_read(filp, kobj, attr, buf, off, count);
++    }
++    mutex_unlock(&sleepimg_mutex);
++    return ret;
++}
++
++static BIN_ATTR(sleep_image, S_IWUSR|S_IWGRP | S_IRUGO, sleep_image_read, sleep_image_write, SLEEPIMG_BYTES);
++static BIN_ATTR(sleep_image_stock, S_IRUGO, sleep_image_stock_read, NULL, SLEEPIMG_BYTES);
++
++static DEVICE_ATTR(refresh_time, S_IWUSR|S_IWGRP | S_IRUGO, refresh_time_show, refresh_time_store);
+ static DEVICE_ATTR(pixelbits, S_IWUSR|S_IWGRP | S_IRUGO, pixelbits_show, pixelbits_store);
+ static DEVICE_ATTR(waveform_mode, S_IWUSR|S_IWGRP | S_IRUGO, waveform_type_show, waveform_type_store);
+ static DEVICE_ATTR(timings_mode, S_IWUSR|S_IWGRP | S_IRUGO, timings_mode_show, timings_mode_store);
+@@ -526,7 +813,7 @@ static DEVICE_ATTR(dither_type, S_IWUSR|S_IWGRP | S_IRUGO, dither_type_show, dit
+ static DEVICE_ATTR(dither_param, S_IWUSR|S_IWGRP | S_IRUGO, dither_parameter_show, dither_parameter_store);
+ static DEVICE_ATTR(dither_colors, S_IWUSR|S_IWGRP | S_IRUGO, dither_colors_show, dither_colors_store);
+ static DEVICE_ATTR(manual_mode, S_IWUSR|S_IWGRP | S_IRUGO, manualMode_show, manualMode_store);
+-static DEVICE_ATTR(eink_temperature, S_IWUSR|S_IWGRP | S_IRUGO, eink_temperature_show, NULL);
++static DEVICE_ATTR(eink_temperature, S_IWUSR|S_IWGRP | S_IRUGO, eink_temperature_show, temperature_offset_store);
+ static DEVICE_ATTR(temperature_offset, S_IWUSR|S_IWGRP | S_IRUGO, temperature_offset_show, temperature_offset_store);
+ static DEVICE_ATTR(log_level, S_IWUSR|S_IWGRP | S_IRUGO, logLevel_show, logLevel_store);
+ static DEVICE_ATTR(clear, S_IWUSR|S_IWGRP | S_IRUGO, NULL, clear_store);
+@@ -551,14 +838,27 @@ static struct attribute *einkinfo_attrs[] = {
+     &dev_attr_power.attr,
+     &dev_attr_eink_temperature.attr,
+     &dev_attr_temperature_offset.attr,
++    &dev_attr_refresh_time.attr,
+     
+ 	NULL,
+ };
+ 
++static struct bin_attribute *einkinfo_bin_attrs[] = {
++    &bin_attr_sleep_image,
++    &bin_attr_sleep_image_stock,
++    NULL,
++};
++
+ static const struct attribute_group einkinfo_attr_group = {
+ 	.attrs = einkinfo_attrs,
++	.bin_attrs = einkinfo_bin_attrs,
+ };
+ 
++/* Kompakt: the sleep screen hold, defined below with the rest of it. */
++static void kompakt_hold_init(void);
++static void kompakt_hold_exit(void);
++static struct notifier_block kompakt_reboot_nb;
++
+ static int eink_spi_probe(struct spi_device *spi)
+ {
+ 	int ret = -1;
+@@ -574,6 +874,9 @@ static int eink_spi_probe(struct spi_device *spi)
+     }
+     g_einkData.einkDrv = einkDrv;
+     dev_set_drvdata(&spi->dev, &g_einkData);
++    /* meink has just registered its frame hook inside EinkInit; wrap it now. */
++    kompakt_hold_init();
++    register_reboot_notifier(&kompakt_reboot_nb);
+ 
+     g_einkData.eink_dbg_kobj = kobject_create_and_add("einkinfo", NULL);
+ 	if (!g_einkData.eink_dbg_kobj) {
+@@ -593,11 +896,21 @@ static int eink_spi_probe(struct spi_device *spi)
+ 
+ static int eink_spi_remove(struct spi_device *spi)
+ {
++    /* Hand meink its own hook back before its deinit unregisters it. */
++    unregister_reboot_notifier(&kompakt_reboot_nb);
++    kompakt_hold_exit();
+     EinkDeinit(g_einkData.einkDrv);
+-    
++
+     sysfs_remove_group(g_einkData.eink_dbg_kobj, &einkinfo_attr_group);
+     kobject_put(g_einkData.eink_dbg_kobj);
+ 
++    mutex_lock(&sleepimg_mutex);
++    vfree(sleepimg_stage);
++    sleepimg_stage = NULL;
++    vfree(sleepimg_orig);
++    sleepimg_orig = NULL;
++    mutex_unlock(&sleepimg_mutex);
++
+ 	printk(KERN_INFO "eink driver: removed\n");
+ 	return 0;
+ }
+@@ -619,8 +932,155 @@ static struct spi_driver panel_ed043wc5_driver =
+ 	.remove = eink_spi_remove,   
+ };
+ 
++/*
++ * Ask meink to power the panel back on after a DOZE wake, where the
++ * DISP_ALIVE resume skips it. wakeup() restarts its frame loop; powerOff(drv, 1)
++ * (power on, despite the name) keeps g_powerOn truthful.
++ */
++extern void register_eink_repower_func(void (*func));
++
++static void kompakt_eink_repower(void)
++{
++    const EinkCallbackTable_t *cb = eink_getCallback();
++
++    int wret = -1, pret = -1;
++
++    if (cb == NULL || g_einkData.einkDrv == 0) {
++        pr_info("kompakt-aod: no meink handle to re-arm\n");
++        return;
++    }
++    if (cb->wakeup)
++        wret = cb->wakeup(g_einkData.einkDrv);
++    if (cb->powerOff)
++        pret = cb->powerOff(g_einkData.einkDrv, 1);
++    g_powerOn = 1;
++    pr_info("kompakt-aod: meink re-armed, wakeup=%d powerOff(1)=%d\n",
++            wret, pret);
++}
++
++/*
++ * Kompakt: keep Android's last frame off the sleep screen. Pump frames are
++ * dropped between a notifier before meink's blank notifier and one after it.
++ * The hook must be wrapped after EinkInit(), which installs it.
++ * See docs/E-inkdriver.md.
++ */
++extern void register_eink_refresh_func(void (*func));
++
++static int (*meink_update)(void *ptr);
++static struct module *meink_update_owner;
++static atomic_t kompakt_powering_down = ATOMIC_INIT(0);
++static atomic_t kompakt_held;
++/* Set once, at power-off or reboot: nothing paints after the power-off picture. */
++static atomic_t kompakt_final = ATOMIC_INIT(0);
++
++static int kompakt_update(void *ptr)
++{
++    if (atomic_read(&kompakt_powering_down) || atomic_read(&kompakt_final)) {
++        /* Force the next capture to differ; under mtkfb's screen_buf_lock. */
++        ((u8 *)ptr)[0] ^= 0x01;
++        pr_info("kompakt-sleepimg: frame %d held off the sleep screen\n",
++                atomic_inc_return(&kompakt_held));
++        return 0;
++    }
++    return meink_update(ptr);
++}
++
++static bool kompakt_is_powerdown(unsigned long event, void *data)
++{
++    struct fb_event *evdata = data;
++
++    return event == FB_EARLY_EVENT_BLANK && evdata && evdata->data &&
++           *(int *)evdata->data == FB_BLANK_POWERDOWN;
++}
++
++static int kompakt_powerdown_begin(struct notifier_block *nb,
++                                   unsigned long event, void *data)
++{
++    if (kompakt_is_powerdown(event, data)) {
++        atomic_set(&kompakt_held, 0);
++        atomic_set(&kompakt_powering_down, 1);
++    }
++    return NOTIFY_DONE;
++}
++
++static int kompakt_powerdown_end(struct notifier_block *nb,
++                                 unsigned long event, void *data)
++{
++    if (kompakt_is_powerdown(event, data)) {
++        atomic_set(&kompakt_powering_down, 0);
++        pr_info("kompakt-sleepimg: power-down painted, %d frame(s) held off it\n",
++                atomic_read(&kompakt_held));
++    }
++    return NOTIFY_DONE;
++}
++
++static struct notifier_block kompakt_powerdown_begin_nb = {
++    .notifier_call = kompakt_powerdown_begin,
++    .priority = 1,
++};
++
++static struct notifier_block kompakt_powerdown_end_nb = {
++    .notifier_call = kompakt_powerdown_end,
++    .priority = -1,
++};
++
++/* After EinkInit(): meink has registered its hook and notifier by then. */
++static void kompakt_hold_init(void)
++{
++    struct module *mod = meink_get();
++    unsigned long fn = mod ? meink_symbol(mod, "eink_update_screen", 4) : 0;
++
++    if (!fn) {
++        if (mod)
++            module_put(mod);
++        pr_err("kompakt-sleepimg: eink_update_screen not found, frames not held\n");
++        return;
++    }
++    meink_update_owner = mod;
++    meink_update = (int (*)(void *))fn;
++    fb_register_client(&kompakt_powerdown_begin_nb);
++    fb_register_client(&kompakt_powerdown_end_nb);
++    register_eink_refresh_func(kompakt_update);
++    pr_info("kompakt-sleepimg: pump frames held across power-down (hook wrapped after EinkInit)\n");
++}
++
++static void kompakt_hold_exit(void)
++{
++    if (!meink_update)
++        return;
++    register_eink_refresh_func(meink_update);
++    fb_unregister_client(&kompakt_powerdown_end_nb);
++    fb_unregister_client(&kompakt_powerdown_begin_nb);
++    module_put(meink_update_owner);
++    meink_update = NULL;
++}
++
++/*
++ * Kompakt: paint the power-off picture last, from the reboot notifier, and
++ * drop every pump frame after it. meink's power_off only queues the frame,
++ * so wait before the power goes.
++ */
++static int kompakt_reboot_notify(struct notifier_block *nb, unsigned long code,
++                                 void *unused)
++{
++    if (g_einkData.einkDrv == 0 || EINK_CB == NULL || EINK_CB->powerOff == NULL)
++        return NOTIFY_DONE;
++    atomic_set(&kompakt_final, 1);
++    EinkPowerOff(g_einkData.einkDrv, 0);
++    g_powerOn = 0;
++    pr_info("kompakt-poweroff: power-off picture painted, frames held from here (event %lu)\n",
++            code);
++    msleep(1500);
++    return NOTIFY_DONE;
++}
++
++static struct notifier_block kompakt_reboot_nb = {
++    .notifier_call = kompakt_reboot_notify,
++};
++
+ static int __init eink_loader_init(void)
+ {
++    register_eink_repower_func(kompakt_eink_repower);
+     return spi_register_driver(&panel_ed043wc5_driver);
+ }
+ 
+diff --git a/drivers/power/supply/mtk_battery.c b/drivers/power/supply/mtk_battery.c
+index 73cc3e34018130c04c39ee98008ca8690be1d203..6433cef42230ef7cb4a508934412e875a38c6cf8 100644
+--- a/drivers/power/supply/mtk_battery.c
++++ b/drivers/power/supply/mtk_battery.c
+@@ -37,6 +37,13 @@ struct tag_bootmode {
+ 	u32 boottype;
+ };
+ 
++int __attribute__ ((weak)) battery_monitor_get_cycle_count(void)
++{
++	return -1;
++}
++
++#define KOMPAKT_DESIGN_CAPACITY_MAH 3000
++
+ int __attribute__ ((weak))
+ 	mtk_battery_daemon_init(struct platform_device *pdev)
+ {
+@@ -272,7 +279,9 @@ static int battery_psy_get_property(struct power_supply *psy,
+ 		val->intval = bs_data->bat_technology;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CYCLE_COUNT:
+-		val->intval = 1;
++		val->intval = battery_monitor_get_cycle_count();
++		if (val->intval < 0)
++			val->intval = 0;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CAPACITY:
+ 		/* 1 = META_BOOT, 4 = FACTORY_BOOT 5=ADVMETA_BOOT */
+@@ -351,12 +360,13 @@ static int battery_psy_get_property(struct power_supply *psy,
+ 			POWER_SUPPLY_CAPACITY_LEVEL_UNKNOWN)
+ 			val->intval = 0;
+ 		else {
+-			int q_max_mah = 0;
++			int q_max_mah = KOMPAKT_DESIGN_CAPACITY_MAH;
+ 			int q_max_uah = 0;
+ 
+-			q_max_mah =
+-				gm->fg_table_cust_data.fg_profile[
+-				gm->battery_id].q_max / 10;
++			if (q_max_mah <= 0)
++				q_max_mah =
++					gm->fg_table_cust_data.fg_profile[
++					gm->battery_id].q_max;
+ 
+ 			q_max_uah = q_max_mah * 1000;
+ 			if (q_max_uah <= 100000) {

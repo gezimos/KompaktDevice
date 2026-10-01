@@ -1,0 +1,58 @@
+From e720f4505313a4e53646008f2f03282c442a4115 Mon Sep 17 00:00:00 2001
+From: gezimos <>
+Date: Sat, 26 Sep 2026 15:17:33 +0200
+Subject: [PATCH 2/5] Kompakt: recovery: a limit on every wait for USB
+
+The USB wait at startup gives up after 5 s, so the menu always appears.
+Sideload waits 10 s and then fails instead of hanging.
+
+Change-Id: I82175be65315ae745f7b9a23f753dbfca4f95f0e
+---
+ install/adb_install.cpp | 5 ++++-
+ recovery_main.cpp       | 6 +++++-
+ 2 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/install/adb_install.cpp b/install/adb_install.cpp
+index 24b937b3d6deeebd101147b2c3db43d5fa831707..5cff323c73a2d6bad49ddf1b56254a56eccde62f 100644
+--- a/install/adb_install.cpp
++++ b/install/adb_install.cpp
+@@ -29,6 +29,7 @@
+ #include <unistd.h>
+ 
+ #include <atomic>
++#include <chrono>
+ #include <functional>
+ #include <map>
+ #include <utility>
+@@ -56,7 +57,8 @@ using CommandFunction = std::function<std::pair<bool, bool>()>;
+ 
+ static bool SetUsbConfig(const std::string& state) {
+   android::base::SetProperty("sys.usb.config", state);
+-  return android::base::WaitForProperty("sys.usb.state", state);
++  // Kompakt: fail the sideload instead of hanging if USB never comes up.
++  return android::base::WaitForProperty("sys.usb.state", state, std::chrono::seconds(10));
+ }
+ 
+ // Parses the minadbd command in |message|; returns MinadbdCommand::kError upon errors.
+diff --git a/recovery_main.cpp b/recovery_main.cpp
+index 3fdef4ea1a9348897ba273d834c40abf5bb25c67..88dc3a4e970ca051c531ae6a822ff0599340b802 100644
+--- a/recovery_main.cpp
++++ b/recovery_main.cpp
+@@ -32,6 +32,7 @@
+ #include <unistd.h>
+ 
+ #include <atomic>
++#include <chrono>
+ #include <filesystem>
+ #include <string>
+ #include <thread>
+@@ -219,7 +220,8 @@ static void copy_userdata_files() {
+ // Sets the usb config to 'state'.
+ static bool SetUsbConfig(const std::string& state) {
+   android::base::SetProperty("sys.usb.config", state);
+-  return android::base::WaitForProperty("sys.usb.state", state);
++  // Kompakt: the menu is drawn after this returns, so never wait without a limit.
++  return android::base::WaitForProperty("sys.usb.state", state, std::chrono::seconds(5));
+ }
+ 
+ static void ListenRecoverySocket(RecoveryUI* ui, std::atomic<Device::BuiltinAction>& action) {

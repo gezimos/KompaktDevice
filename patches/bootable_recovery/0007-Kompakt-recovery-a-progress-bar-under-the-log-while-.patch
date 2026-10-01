@@ -1,0 +1,115 @@
+From 7058f368252b5780752c9b22b0ef48540d5b52ae Mon Sep 17 00:00:00 2001
+From: gezimos <>
+Date: Sat, 26 Sep 2026 22:13:49 +0200
+Subject: [PATCH] Kompakt: recovery: a progress bar under the log while
+ installing
+
+In text mode, draw a progress bar and percentage under the log while
+installing. It redraws only when the shown percentage changes.
+
+Change-Id: I9abb2a9957e8abec9a39e9dc1ab86dac5f9e495c
+---
+ recovery_ui/include/recovery_ui/screen_ui.h |  6 +++
+ recovery_ui/screen_ui.cpp                   | 56 ++++++++++++++++++++-
+ 2 files changed, 61 insertions(+), 1 deletion(-)
+
+diff --git a/recovery_ui/include/recovery_ui/screen_ui.h b/recovery_ui/include/recovery_ui/screen_ui.h
+index 22be4fdab3d539f2af8b2ac8db53ad9b77509577..11f2836acd6cff9cc255aacdc74beb78c490dc34 100644
+--- a/recovery_ui/include/recovery_ui/screen_ui.h
++++ b/recovery_ui/include/recovery_ui/screen_ui.h
+@@ -496,6 +496,11 @@ class ScreenRecoveryUI : public RecoveryUI, public DrawInterface {
+   std::unique_ptr<GRSurface> stage_marker_fill_;
+ 
+   ProgressType progressBarType;
++  // Kompakt: last percentage drawn in text mode.
++  int drawn_percent_ = -1;
++  int ProgressPercentLocked() const;
++  int TextProgressHeight() const;
++  void draw_text_progress_locked();
+ 
+   float progressScopeStart, progressScopeSize, progress;
+   double progressScopeTime, progressScopeDuration;
+diff --git a/recovery_ui/screen_ui.cpp b/recovery_ui/screen_ui.cpp
+index 808fcdaa238a2d2ad79cafd06e2c58cc7893e9f6..b86d1bca2f8e1a123c38a40d09ea628d6937d46c 100644
+--- a/recovery_ui/screen_ui.cpp
++++ b/recovery_ui/screen_ui.cpp
+@@ -808,6 +808,45 @@ void ScreenRecoveryUI::draw_screen_locked() {
+ 
+   draw_menu_and_text_buffer_locked(GetMenuHelpMessage());
+   draw_battery_capacity_locked();
++  draw_text_progress_locked();
++}
++
++// Kompakt: in text mode the stock bar is not drawn, so draw one under the log.
++int ScreenRecoveryUI::ProgressPercentLocked() const {
++  float p = progressScopeStart + progress * progressScopeSize;
++  if (p < 0) p = 0;
++  if (p > 1) p = 1;
++  return static_cast<int>(p * 100);
++}
++
++int ScreenRecoveryUI::TextProgressHeight() const {
++  return progressBarType == DETERMINATE ? char_height_ + 8 : 0;
++}
++
++void ScreenRecoveryUI::draw_text_progress_locked() {
++  if (progressBarType != DETERMINATE) {
++    drawn_percent_ = -1;
++    return;
++  }
++  int percent = ProgressPercentLocked();
++  std::string label = std::to_string(percent) + "%";
++  int top = ScreenHeight() - margin_height_ - char_height_ - 2;
++  int left = margin_width_;
++  int right = ScreenWidth() - margin_width_ - 5 * char_width_;
++  int bar_top = top + char_height_ / 4;
++  int bar_bottom = top + char_height_ - char_height_ / 4;
++  int line = 2;
++
++  SetColor(UIElement::LOG);
++  gr_fill(left, bar_top, right, bar_top + line);
++  gr_fill(left, bar_bottom - line, right, bar_bottom);
++  gr_fill(left, bar_top, left + line, bar_bottom);
++  gr_fill(right - line, bar_top, right, bar_bottom);
++  int filled = left + (right - left) * percent / 100;
++  if (filled > left) gr_fill(left, bar_top, filled, bar_bottom);
++  DrawTextLine(ScreenWidth() - margin_width_ - static_cast<int>(label.size()) * char_width_, top,
++               label, false);
++  drawn_percent_ = percent;
+ }
+ 
+ // Draws the menu and text buffer on the screen. Should only be called with updateMutex locked.
+@@ -854,7 +893,8 @@ void ScreenRecoveryUI::draw_menu_and_text_buffer_locked(
+   SetColor(UIElement::LOG);
+   int row = text_row_;
+   size_t count = 0;
+-  for (int ty = ScreenHeight() - margin_height_ - char_height_; ty >= y && count < text_rows_;
++  for (int ty = ScreenHeight() - margin_height_ - char_height_ - TextProgressHeight();
++       ty >= y && count < text_rows_;
+        ty -= char_height_, ++count) {
+     DrawTextLine(margin_width_, ty, text_[row], false);
+     --row;
+@@ -1035,6 +1075,10 @@ void ScreenRecoveryUI::ProgressThreadLoop() {
+         }
+       }
+ 
++      // Kompakt: in text mode, redraw only when the percentage changes.
++      if (redraw && show_text && progressBarType == DETERMINATE) {
++        redraw = ProgressPercentLocked() != drawn_percent_;
++      }
+       if (redraw) update_progress_locked();
+     }
+ 
+@@ -1290,6 +1334,12 @@ void ScreenRecoveryUI::SetProgress(float fraction) {
+   std::lock_guard<std::mutex> lg(updateMutex);
+   if (fraction < 0.0) fraction = 0.0;
+   if (fraction > 1.0) fraction = 1.0;
++  if (progressBarType == DETERMINATE && fraction > progress && show_text) {
++    // Kompakt: the bar in text mode changes by whole percentages.
++    progress = fraction;
++    if (ProgressPercentLocked() != drawn_percent_) update_progress_locked();
++    return;
++  }
+   if (progressBarType == DETERMINATE && fraction > progress) {
+     // Skip updates that aren't visibly different.
+     int width = gr_get_width(progress_bar_empty_.get());

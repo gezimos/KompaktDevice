@@ -1,0 +1,128 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gezim <gezimos@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 21:30:00 +0200
+Subject: [PATCH 1/1] Kompakt: recovery: switch to the other slot
+
+---
+diff --git a/install/include/install/snapshot_utils.h b/install/include/install/snapshot_utils.h
+--- a/install/include/install/snapshot_utils.h
++++ b/install/include/install/snapshot_utils.h
+@@ -31,3 +31,6 @@
+ 
+ // Check whether it's okay to cancel any in-progress OTAs for sideload.
+ bool IsCancelUpdateSafe(Device* device);
++
++// Cancels an update that has not started merging, so the other slot can boot.
++bool CancelUpdateForSlotSwitch(Device* device);
+diff --git a/install/snapshot_utils.cpp b/install/snapshot_utils.cpp
+--- a/install/snapshot_utils.cpp
++++ b/install/snapshot_utils.cpp
+@@ -26,6 +26,7 @@
+ using android::snapshot::CancelResult;
+ using android::snapshot::CreateResult;
+ using android::snapshot::SnapshotManager;
++using android::snapshot::UpdateState;
+ 
+ bool IsCancelUpdateSafe(Device* device) {
+   auto sm = SnapshotManager::New();
+@@ -83,3 +84,34 @@
+   }
+   return true;
+ }
++
++bool CancelUpdateForSlotSwitch(Device* device) {
++  if (!android::base::GetBoolProperty("ro.virtual_ab.enabled", false)) {
++    return true;
++  }
++
++  RecoveryUI* ui = device->GetUI();
++  auto sm = SnapshotManager::New();
++  if (!sm) {
++    ui->Print("Could not create SnapshotManager.\n");
++    return false;
++  }
++  auto mount = sm->EnsureMetadataMounted();
++  if (!mount || !mount->HasDevice()) {
++    ui->Print("Could not mount /metadata.\n");
++    return false;
++  }
++
++  // Once merging, the update owns the partitions: it has to finish on its own slot.
++  auto state = sm->GetUpdateState();
++  if (state == UpdateState::Merging || state == UpdateState::MergeNeedsReboot ||
++      state == UpdateState::MergeFailed) {
++    ui->Print("The update is merging. Boot it and let the merge finish.\n");
++    return false;
++  }
++  if (state != UpdateState::None && !sm->CancelUpdate()) {
++    ui->Print("Could not cancel the unfinished update.\n");
++    return false;
++  }
++  return true;
++}
+diff --git a/recovery.cpp b/recovery.cpp
+--- a/recovery.cpp
++++ b/recovery.cpp
+@@ -39,6 +39,7 @@
+ #include <android-base/properties.h>
+ #include <android-base/stringprintf.h>
+ #include <android-base/strings.h>
++#include <BootControlClient.h>
+ #include <cutils/properties.h> /* for property_list */
+ #include <fs_mgr/roots.h>
+ #include <volume_manager/VolumeManager.h>
+@@ -656,6 +657,29 @@
+         ui->Print("Enabled ADB.\n");
+         break;
+ 
++      case Device::SWITCH_SLOT: {
++        // Kompakt: the way back when an update's slot does not boot
++        auto boot_control = android::hal::BootControlClient::WaitForService();
++        if (!boot_control) {
++          ui->Print("Boot control is not available.\n");
++          break;
++        }
++        int32_t other = 1 - boot_control->GetCurrentSlot();
++        std::string question = "Boot slot " + boot_control->GetSuffix(other) + " next?";
++        if (!yes_no(device, question.c_str(), "An unfinished update is cancelled.")) {
++          break;
++        }
++        if (!CancelUpdateForSlotSwitch(device)) {
++          break;
++        }
++        if (!boot_control->SetActiveBootSlot(other).IsOk()) {
++          ui->Print("Could not switch slots.\n");
++          break;
++        }
++        ui->Print("Switched to slot %s.\n", boot_control->GetSuffix(other).c_str());
++        return Device::REBOOT;
++      }
++
+       case Device::RUN_GRAPHICS_TEST:
+         run_graphics_test(ui);
+         break;
+diff --git a/recovery_ui/device.cpp b/recovery_ui/device.cpp
+--- a/recovery_ui/device.cpp
++++ b/recovery_ui/device.cpp
+@@ -42,6 +42,7 @@
+   { "Enter fastboot", Device::ENTER_FASTBOOT },
+   { "Reboot to bootloader", Device::REBOOT_BOOTLOADER },
+   { "Reboot to recovery", Device::REBOOT_RECOVERY },
++  { "Switch to the other slot", Device::SWITCH_SLOT },
+   { "Mount/unmount system", Device::MOUNT_SYSTEM },
+   { "View recovery logs", Device::VIEW_RECOVERY_LOGS },
+   { "Enable ADB", Device::ENABLE_ADB },
+diff --git a/recovery_ui/include/recovery_ui/device.h b/recovery_ui/include/recovery_ui/device.h
+--- a/recovery_ui/include/recovery_ui/device.h
++++ b/recovery_ui/include/recovery_ui/device.h
+@@ -73,6 +73,7 @@
+     SHUTDOWN_FROM_FASTBOOT = 21,
+     WIPE_SYSTEM = 100,
+     ENABLE_ADB = 101,
++    SWITCH_SLOT = 102,
+     MENU_BASE = 200,
+     MENU_WIPE = 202,
+     MENU_ADVANCED = 203,
+-- 
+2.43.0
+

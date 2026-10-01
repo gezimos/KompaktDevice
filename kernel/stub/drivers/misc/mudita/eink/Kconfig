@@ -1,0 +1,13 @@
+config PANEL_EINK_ED043WC5
+	bool "ED043WC5 panel"
+config PANEL_EINK_WAVESHARE75BV2
+	bool "Waveshare 7.5 BV2 panel"
+config PANEL_EINK_WAVESHARE27BV2
+	bool "Waveshare 2.7 BV2 panel"
+config PANEL_EINK_TCON
+	bool "TCON panel"
+config MUDITA_EINK_DEBUG
+	bool "eink debug"
+config MUDITA_EINK_TCORR
+	int "temperature correction"
+	default 0

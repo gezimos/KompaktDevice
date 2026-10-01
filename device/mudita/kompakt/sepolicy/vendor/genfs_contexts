@@ -1,0 +1,25 @@
+# /sys/einkinfo, node by node. The first fourteen match stock exactly.
+
+genfscon sysfs /einkinfo/waveform_mode      u:object_r:sysfs_eink_waveform:s0
+genfscon sysfs /einkinfo/pixelbits          u:object_r:sysfs_eink_bpp:s0
+genfscon sysfs /einkinfo/contrast           u:object_r:sysfs_eink_contrast:s0
+genfscon sysfs /einkinfo/gamma              u:object_r:sysfs_eink_gamma:s0
+genfscon sysfs /einkinfo/brightness         u:object_r:sysfs_eink_brightness:s0
+genfscon sysfs /einkinfo/eink_temperature   u:object_r:sysfs_eink_temperature:s0
+genfscon sysfs /einkinfo/fps_limit          u:object_r:sysfs_eink_fps:s0
+genfscon sysfs /einkinfo/power              u:object_r:sysfs_eink_power:s0
+genfscon sysfs /einkinfo/timings_mode       u:object_r:sysfs_eink_timings_mode:s0
+genfscon sysfs /einkinfo/dither_type        u:object_r:sysfs_eink_dithering_type:s0
+genfscon sysfs /einkinfo/dither_param       u:object_r:sysfs_eink_dithering_param:s0
+genfscon sysfs /einkinfo/dither_colors      u:object_r:sysfs_eink_dithering_colors:s0
+genfscon sysfs /einkinfo/update_mode        u:object_r:sysfs_eink_update:s0
+genfscon sysfs /einkinfo/clear              u:object_r:sysfs_bit_switch:s0
+
+# Ours: stock leaves these as generic sysfs.
+genfscon sysfs /einkinfo/refresh_mode       u:object_r:sysfs_eink_refresh_mode:s0
+genfscon sysfs /einkinfo/manual_mode        u:object_r:sysfs_eink_manual_mode:s0
+genfscon sysfs /einkinfo/temperature_offset u:object_r:sysfs_eink_temperature_offset:s0
+genfscon sysfs /einkinfo/log_level          u:object_r:sysfs_eink_log_level:s0
+
+# The hardware offline switch.
+genfscon sysfs /bus/platform/drivers/pmic-codec-accdet/irqkey_state u:object_r:sysfs_irqkey:s0

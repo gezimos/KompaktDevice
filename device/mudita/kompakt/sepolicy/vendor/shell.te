@@ -1,0 +1,4 @@
+# Let adb shell in recovery read /tmp/recovery.log (tmpfs).
+recovery_only(`
+  allow shell tmpfs:file r_file_perms;
+')

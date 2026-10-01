@@ -1,0 +1,5 @@
+# The recovery boot HAL reads /etc/recovery.fstab (rootfs) to find misc,
+# and aborts without it.
+recovery_only(`
+  allow hal_bootctl_default rootfs:file r_file_perms;
+')

@@ -1,0 +1,4 @@
+# 480x800 after the driver's rotation (docs/E-inkdriver.md).
+ro.sf.lcd_density=213
+
+debug.sf.frame_rate_multiple_threshold=0

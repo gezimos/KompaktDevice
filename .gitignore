@@ -1,0 +1,17 @@
+*.ko
+*.o
+*.dtb
+boot*.img
+*.7z
+.DS_Store
+._*
+vendor/*/*/proprietary/
+# device build prebuilts: kernel, device tree, stock recovery modules
+device/mudita/kompakt/prebuilt/*
+!device/mudita/kompakt/prebuilt/README.md
+
+# personal notes, not for the repo
+TODO.md
+
+# Mudita kernel tree: cloned/synced, never committed (see kernel/README.md)
+kernel/mudita/

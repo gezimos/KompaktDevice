@@ -1,0 +1,28 @@
+From 65520955910fd14c5a6bb7710a08491781eb1071 Mon Sep 17 00:00:00 2001
+From: gezimos <>
+Date: Sat, 26 Sep 2026 22:13:49 +0200
+Subject: [PATCH] Kompakt: update_engine: sideload reports its progress
+ fraction
+
+Send set_progress as a fraction. "%.lf" has precision 0, so recovery only
+ever got 0 or 1.
+
+Change-Id: Ic1a4219a5643bb532984c97ba17531e30a455749
+---
+ aosp/sideload_main.cc | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/aosp/sideload_main.cc b/aosp/sideload_main.cc
+index 68086ad5e9400280715bb37b5e44b616ee26a637..0cc6b28b6a0674c8934bda62ea871f6b9fd2cc3a 100644
+--- a/aosp/sideload_main.cc
++++ b/aosp/sideload_main.cc
+@@ -77,7 +77,8 @@ class SideloadDaemonState : public DaemonStateInterface,
+       ReportStatus(android::base::StringPrintf("progress 0.5 0"));
+     }
+     if (status_ != status || fabs(progress - progress_) > 0.005) {
+-      ReportStatus(android::base::StringPrintf("set_progress %.lf", progress));
++      // Kompakt: "%.lf" has precision 0 and only ever sent 0 or 1.
++      ReportStatus(android::base::StringPrintf("set_progress %.3lf", progress));
+     }
+     progress_ = progress;
+     status_ = status;
