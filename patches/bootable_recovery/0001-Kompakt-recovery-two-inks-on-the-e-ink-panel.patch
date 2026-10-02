@@ -1,0 +1,78 @@
+From fdcb62e3c950a52f481747246d2f79f485663d12 Mon Sep 17 00:00:00 2001
+From: gezimos <>
+Date: Sat, 26 Sep 2026 15:17:33 +0200
+Subject: [PATCH 1/5] Kompakt: recovery: two inks on the e-ink panel
+
+Draw every recovery element in pure black or pure white, so nothing
+dithers on the e-ink panel.
+
+Change-Id: Ib75d10c5af8f13ba4df5d81fe7fb883db55ac36b
+---
+ recovery_ui/screen_ui.cpp | 52 ++++++---------------------------------
+ 1 file changed, 7 insertions(+), 45 deletions(-)
+
+diff --git a/recovery_ui/screen_ui.cpp b/recovery_ui/screen_ui.cpp
+index b5b7060e9e83af1a6354dde8635bdab9c34d4b24..b0c5b71e2d44fe10f16c8e8c2edc1262aade2927 100644
+--- a/recovery_ui/screen_ui.cpp
++++ b/recovery_ui/screen_ui.cpp
+@@ -586,57 +586,15 @@ void ScreenRecoveryUI::draw_foreground_locked() {
+    fastbootd dark: #E65100
+    fastboot light: #FDD835 */
+ void ScreenRecoveryUI::SetColor(UIElement e) const {
++  // Kompakt: two inks only. The kernel inverts recovery frames, so white is ink.
+   switch (e) {
+-    case UIElement::BATTERY_LOW:
+-      if (fastbootd_logo_enabled_)
+-        gr_color(0xfd, 0x35, 0x35, 255);
+-      else
+-        gr_color(0xc7, 0x15, 0x85, 255);
+-      break;
+-    case UIElement::INFO:
+-      if (fastbootd_logo_enabled_)
+-        gr_color(0xfd, 0xd8, 0x35, 255);
+-      else
+-        gr_color(0xf8, 0x90, 0xff, 255);
+-      break;
+-    case UIElement::HEADER:
+-      if (fastbootd_logo_enabled_)
+-        gr_color(0xfd, 0xd8,0x35, 255);
+-      else
+-        gr_color(0xf8, 0x90, 0xff, 255);
+-      break;
+-    case UIElement::MENU:
+-      gr_color(0xd8, 0xd8, 0xd8, 255);
+-      break;
+     case UIElement::MENU_BG:
+-      if (fastbootd_logo_enabled_)
+-        gr_color(0xe6 * 0.20, 0x51 * 0.20, 0x00 * 0.20, 255);
+-      else
+-        gr_color(0x7c * 0.20, 0x4d * 0.20, 0xff * 0.20, 255);
+-      break;
+-    case UIElement::MENU_SEL_BG:
+-    case UIElement::SCROLLBAR:
+-      if (fastbootd_logo_enabled_)
+-        gr_color(0xe6, 0x51, 0x00, 255);
+-      else
+-        gr_color(0x7c, 0x4d, 0xff, 255);
+-      break;
+-    case UIElement::MENU_SEL_BG_ACTIVE:
+-      gr_color(0, 156, 100, 255);
+-      break;
+     case UIElement::MENU_SEL_FG:
+-      if (fastbootd_logo_enabled_)
+-        gr_color(0, 0, 0, 255);
+-      else
+-        gr_color(0xd8, 0xd8, 0xd8, 255);
+-      break;
+-    case UIElement::LOG:
+-      gr_color(196, 196, 196, 255);
+-      break;
+     case UIElement::TEXT_FILL:
+-      gr_color(0, 0, 0, 160);
++      gr_color(0, 0, 0, 255);
+       break;
+     default:
++      // Text, headers, battery, log, scrollbar and selection.
+       gr_color(255, 255, 255, 255);
+       break;
+   }

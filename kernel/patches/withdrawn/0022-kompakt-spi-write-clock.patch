@@ -1,0 +1,71 @@
+--- a/drivers/misc/mudita/eink_loader/eink_spi_hal.c
++++ b/drivers/misc/mudita/eink_loader/eink_spi_hal.c
+@@ -28,6 +28,21 @@
+ /* SPI Configuration Constants */
+ #define EINK_SPI_MAX_SPEED_HZ  18000000  /* 18 MHz */
+ 
++/*
++ * Kompakt: clock for writes only; reads stay at EINK_SPI_MAX_SPEED_HZ. The
++ * controller divides 109.2 MHz by 2k, so a request lands on 54.6, 27.3, 18.2
++ * or 13.65 MHz, and stock's 18 MHz rounds down to 13.65. See
++ * docs/E-inkdriver.md.
++ */
++static int write_hz = 20000000;
++module_param(write_hz, int, 0644);
++MODULE_PARM_DESC(write_hz, "SPI clock requested for writes to the panel");
++
++static u32 eink_write_hz(void)
++{
++    return (write_hz >= 1000000 && write_hz <= 60000000) ? write_hz : EINK_SPI_MAX_SPEED_HZ;
++}
++
+ static int dbglogLevel = 0;
+ static const EinkCallbackTable_t* g_callbackTable = 0;
+ 
+@@ -1099,7 +1114,7 @@
+ 	/* setup spi related info */
+ 	spi->bits_per_word = 8;
+ 	spi->mode = SPI_MODE_0;
+-    spi->max_speed_hz = EINK_SPI_MAX_SPEED_HZ;
++    spi->max_speed_hz = eink_write_hz();
+ 	ret = spi_setup(spi);
+ 	if (ret < 0) {
+ 		dev_err(&spi->dev, "spi setup failed %d", ret);
+@@ -1276,6 +1291,7 @@
+     }
+ 
+     spi->mode = SPI_MODE_0;
++    spi->max_speed_hz = eink_write_hz();
+     retVal = spi_setup(spi);
+     if (retVal < 0) {
+         dev_err(&spi->dev, "spi setup failed %d", retVal);
+@@ -1350,6 +1366,13 @@
+     }
+     gTestLastStep = ktime_get();
+     retVal = spi_write(spi, buf, size);
++    if (measure && size >= 4096) {
++        s64 us = ktime_to_us(ktime_sub(ktime_get(), gTestLastStep));
++
++        if (us > 0)
++            pr_info("einkrate bytes=%u us=%lld khz=%lld\n",
++                    size, us, (s64)size * 8000 / us);
++    }
+     if (dbglogLevel != 0)
+     {
+         nowtime = ktime_get();
+@@ -1377,6 +1400,7 @@
+     }
+ 
+     spi->mode = SPI_MODE_1;
++    spi->max_speed_hz = EINK_SPI_MAX_SPEED_HZ;
+     retVal = spi_setup(spi);
+     if (retVal < 0) {
+         dev_err(&spi->dev, "spi setup failed %d", retVal);
+@@ -1385,6 +1409,7 @@
+ 
+     eink_waitForReady(hw);
+     retVal = spi_read(spi, buf, size);
++    spi->max_speed_hz = eink_write_hz();
+     if (retVal >= 0)
+         eink_trace("r", buf, size);
+     return retVal;

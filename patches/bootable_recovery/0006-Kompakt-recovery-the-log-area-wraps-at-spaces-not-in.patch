@@ -1,0 +1,47 @@
+From b00e2f497db42636ef006e2d9d2e03dfc1ece53a Mon Sep 17 00:00:00 2001
+From: gezimos <>
+Date: Sat, 26 Sep 2026 18:57:24 +0200
+Subject: [PATCH 6/6] Kompakt: recovery: the log area wraps at spaces, not
+ inside words
+
+A full log row breaks at its last space and the part-word moves to the
+next row. Only a word longer than a row still breaks mid-word.
+
+Change-Id: I8555a04582a5daf2412585aededc0c55230206cf
+---
+ recovery_ui/screen_ui.cpp | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/recovery_ui/screen_ui.cpp b/recovery_ui/screen_ui.cpp
+index 14d8dce6d957f911e6a05219d3a7245e7e30e467..808fcdaa238a2d2ad79cafd06e2c58cc7893e9f6 100644
+--- a/recovery_ui/screen_ui.cpp
++++ b/recovery_ui/screen_ui.cpp
+@@ -1318,12 +1318,27 @@ void ScreenRecoveryUI::PrintV(const char* fmt, bool copy_to_stdout, va_list ap)
+   std::lock_guard<std::mutex> lg(updateMutex);
+   if (text_rows_ > 0 && text_cols_ > 0) {
+     for (const char* ptr = str.c_str(); *ptr != '\0'; ++ptr) {
++      bool wrapped = false;
+       if (*ptr == '\n' || text_col_ >= text_cols_) {
++        // Kompakt: break a full row at its last space, not inside a word.
++        std::string carry;
++        if (*ptr != '\n' && *ptr != ' ') {
++          const char* row = text_[text_row_];
++          size_t cut = text_col_;
++          while (cut > 0 && row[cut - 1] != ' ') --cut;
++          if (cut > 1 && cut < text_col_) {
++            carry.assign(row + cut, text_col_ - cut);
++            text_col_ = cut - 1;
++          }
++        }
+         text_[text_row_][text_col_] = '\0';
+         text_col_ = 0;
+         text_row_ = (text_row_ + 1) % text_rows_;
++        for (char c : carry) text_[text_row_][text_col_++] = c;
++        wrapped = *ptr != '\n';
+       }
+-      if (*ptr != '\n') text_[text_row_][text_col_++] = *ptr;
++      if (*ptr == '\n' || (wrapped && *ptr == ' ' && text_col_ == 0)) continue;
++      text_[text_row_][text_col_++] = *ptr;
+     }
+     text_[text_row_][text_col_] = '\0';
+     update_screen_locked();

@@ -1,0 +1,27 @@
+Kompakt: USB serial: no wake-up on a closed tty
+
+gs_start_io() woke port.tty without checking it. gs_start_rx() drops
+port_lock, so a close on another CPU (the Kompakt app closing ttyGS0 as the
+host configures ACM at plug-in) left it NULL and the phone panicked in
+tty_wakeup(). Same fix as upstream Linux.
+
+--- a/drivers/usb/gadget/function/u_serial.c
++++ b/drivers/usb/gadget/function/u_serial.c
+@@ -605,10 +605,15 @@
+ 	started = gs_start_rx(port);
+ 
+ 	if (started) {
++		struct tty_struct *tty;
++
+ 		gs_start_tx(port);
+ 		/* Unblock any pending writes into our circular buffer, in case
+-		 * we didn't in gs_start_tx() */
+-		tty_wakeup(port->port.tty);
++		 * we didn't in gs_start_tx(). gs_start_rx() drops port_lock, so
++		 * the tty may have been closed meanwhile. */
++		tty = port->port.tty;
++		if (tty)
++			tty_wakeup(tty);
+ 	} else {
+ 		gs_free_requests(ep, head, &port->read_allocated);
+ 		gs_free_requests(port->port_usb->in, &port->write_pool,

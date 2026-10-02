@@ -1,0 +1,13 @@
+# Recovery ramdisk only. Without these types fastbootd cannot open super or
+# write any partition.
+/dev/block/by-name/super                             u:object_r:super_block_device:s0
+/dev/block/by-name/boot(_[ab])?                      u:object_r:boot_block_device:s0
+/dev/block/by-name/dtbo(_[ab])?                      u:object_r:boot_block_device:s0
+/dev/block/by-name/vbmeta(_system|_vendor)?(_[ab])?  u:object_r:boot_block_device:s0
+/dev/block/by-name/md_udc                            u:object_r:metadata_block_device:s0
+/dev/block/by-name/userdata                          u:object_r:userdata_block_device:s0
+/dev/block/by-name/frp                               u:object_r:frp_block_device:s0
+/dev/block/by-name/recovery                          u:object_r:recovery_block_device:s0
+
+# para is the misc partition (slot state); the boot HAL only opens misc_block_device.
+/dev/block/by-name/para                              u:object_r:misc_block_device:s0

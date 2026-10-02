@@ -1,0 +1,25 @@
+# KompaktService drives the panel. Grant the e-ink nodes by type; generic sysfs
+# is neverallow'ed.
+
+allow system_app {
+    sysfs_eink_waveform
+    sysfs_eink_bpp
+    sysfs_eink_contrast
+    sysfs_eink_gamma
+    sysfs_eink_brightness
+    sysfs_eink_temperature
+    sysfs_eink_fps
+    sysfs_eink_power
+    sysfs_eink_timings_mode
+    sysfs_eink_dithering_type
+    sysfs_eink_dithering_param
+    sysfs_eink_dithering_colors
+    sysfs_bit_switch
+    sysfs_eink_refresh_mode
+    sysfs_eink_manual_mode
+    sysfs_eink_temperature_offset
+    sysfs_eink_log_level
+    sysfs_irqkey
+}:file { open read write getattr };
+
+allow system_app sysfs:dir search;
