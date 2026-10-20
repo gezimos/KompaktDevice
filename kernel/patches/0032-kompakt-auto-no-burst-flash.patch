@@ -1,0 +1,35 @@
+Kompakt: Auto's moving phase no longer flashes black and white
+
+Auto enters its fast phase with a manual GL16 to A2 switch, and meink's
+state machine answers every manual switch from a 16-grey waveform to a
+two-level one with a black clear, a white clear and a redraw: a flash at
+the start of every scroll burst. meink keeps a one-shot flag on its
+render object, set after energy saving, that makes the next such switch
+skip the clear. The loader sets that flag just before the A2 switch of
+the moving phase. The settle (A2 to GL16) never flashed. The Kompakt
+app's own Text or Quality to Fast switches are unchanged.
+
+--- a/drivers/misc/mudita/eink_loader/loader.c
++++ b/drivers/misc/mudita/eink_loader/loader.c
+@@ -43,6 +43,9 @@
+  * not know it, so the read-back keeps the old mode. See docs/E-inkdriver.md.
+  */
+ #define KOMPAKT_AUTO_NAME "KAUTO"
++/* Kompakt: meink's render object ([1] of the Meink handle) and its one-shot "skip the switch clear" flag. */
++#define KOMPAKT_MEINK_RENDER     0x8
++#define KOMPAKT_RENDER_SKIP_CLEAR 0x244
+ 
+ extern void eink_auto_enable(int on, void (*apply)(int moving));
+ extern int  eink_auto_state(void);
+@@ -152,6 +155,11 @@
+         return;
+ 
+     if (moving) {
++        u8 *render = *(u8 **)((u8 *)g_einkData.einkDrv + KOMPAKT_MEINK_RENDER);
++
++        /* Kompakt: a manual GL16 to A2 switch clears black then white first; meink skips that once when this is set. */
++        if (render)
++            WRITE_ONCE(*(u32 *)(render + KOMPAKT_RENDER_SKIP_CLEAR), 1);
+         EinkSetWaveformType(g_einkData.einkDrv, kEinkWaveformA2);
+         EinkSetBpp(g_einkData.einkDrv, 1);
+         EinkSetDitheringParameter(g_einkData.einkDrv, 160);

@@ -26,11 +26,12 @@ done > "$list"
 n=0
 while read -r f; do
   cmp -s "$STAGE/$f" "$GLO/$f" || { echo "ours changed $f, refusing to replace it"; exit 1; }
-  label=$(getfattr -n security.selinux --only-values "$OUT/$f")
+  # python, not getfattr: the build server has no attr package
+  label=$(python3 -c 'import os,sys;print(os.getxattr(sys.argv[1],"security.selinux").rstrip(b"\0").decode())' "$OUT/$f")
   cp "$USA/$f" "$OUT/$f"
   chown root:root "$OUT/$f"
   chmod --reference="$STAGE/$f" "$OUT/$f"
-  setfattr -n security.selinux -v "$label" "$OUT/$f"
+  python3 -c 'import os,sys;os.setxattr(sys.argv[1],"security.selinux",sys.argv[2].encode()+b"\0")' "$OUT/$f" "$label"
   n=$((n + 1))
 done < "$list"
 rm -f "$list"

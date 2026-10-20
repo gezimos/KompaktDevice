@@ -1,0 +1,34 @@
+Kompakt: a2grey lifts the A2 bit depth to 4
+
+Mudita's meink sets the bit depth only in setWaveformType, from a table
+by type (A2 = 1), and its MeinkSetBpp is a no-op, so pixelbits writes
+never took and Fast was always 1 bpp: the grey transitions a2grey adds
+to the A2 record never saw a grey pixel. The loader's set-waveform hook
+now writes 4 into the display's bpp field after an A2 upload that
+carries the a2grey record. uploadImageToDisplay reads that field for
+both the packing and the depth byte it sends the panel, and the refresh
+mode byte does not depend on depth, so the frame goes out as the GL16
+data path with the A2 LUT. Turning a2grey off re-uploads and meink's
+table restores 1 bpp. Experiment; notes in the private study.
+
+--- a/drivers/misc/mudita/eink_loader/loader.c
++++ b/drivers/misc/mudita/eink_loader/loader.c
+@@ -816,6 +816,7 @@
+ #define WF_DISP_VT        0x08
+ #define WF_DISP_API_MUTEX 0x10
+ #define WF_DISP_WAVEFORM  0x90
++#define WF_DISP_BPP       0xa8            /* meink sets it from the waveform; pixelbits writes are a no-op */
+ #define WF_MEINK_OPEN     0x4c
+ 
+ #define WF_GU16           0x1
+@@ -1038,6 +1039,10 @@
+     unsigned int done = READ_ONCE(wf_done[idx]);
+     const u8 *rec = wf_live + idx * WF_REC;
+ 
++    /* Kompakt: a2grey needs grey input, and meink pairs A2 with 1 bpp; lift it to 4, the GL16 data path. */
++    if (ret == 0 && group == WF_A2 && (done & WF_A2GREY))
++        WRITE_ONCE(*(u32 *)((u8 *)display + WF_DISP_BPP), 4);
++
+     /* crc and length match the lutd= field of refresh_time when this record went out */
+     pr_info("kompakt-wf: upload %s band %u N=%u crc=%08x/%u%s%s%s%s\n", wf_name[group],
+             idx % WF_BANDS, rec[0], crc32_le(0, rec, rec[0] * WF_FRAME + 0x41),

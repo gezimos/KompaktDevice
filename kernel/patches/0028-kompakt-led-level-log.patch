@@ -1,0 +1,29 @@
+Kompakt: the notification LED logs the level it sets
+
+One kernel line per light change on the red, green and blue sinks: the
+level bright_set writes, and for the lights HAL's timed light the duty
+peak and the level breathing takes from it. The kernel log reaches
+logcat (tag kompakt-led), so a brightness report can be checked against
+what the driver did without root.
+
+--- a/drivers/misc/mediatek/pmic/mt6370/mt6370_pmu_rgbled.c
++++ b/drivers/misc/mediatek/pmic/mt6370/mt6370_pmu_rgbled.c
+@@ -1065,6 +1065,9 @@
+ 	}
+ 	ret = mt6370_pmu_led_update_bits(led_cdev, reg_addr, reg_mask,
+ 					 (bright & reg_mask) << reg_shift);
++	/* Kompakt: one line per light change, for brightness reports (kernel log via logcat). */
++	if (led_index != MT6370_PMU_LED4)
++		pr_info("kompakt-led: %s level %d\n", led_cdev->name, bright);
+ 	if (ret < 0) {
+ 		dev_err(led_cdev->dev, "update brightness fail\n");
+ 		return;
+@@ -1285,6 +1288,8 @@
+ 			peak = max_t(int, peak, pat->duty[i]);
+ 		level = DIV_ROUND_UP(peak * led_cdev->max_brightness, 100);
+ 	}
++	pr_info("kompakt-led: %s breathe peak %d level %d max %d\n", led_cdev->name,
++		peak, level, led_cdev->max_brightness);
+ 	if (!level) {
+ 		led_set_brightness(led_cdev, LED_OFF);
+ 		return 0;

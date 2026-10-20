@@ -39,7 +39,8 @@ lib64/hw/fpsensor_fingerprint.default.so    navigation on (tools/patch-fp-naviga
 etc/fpsensor_nav.ini                        its settings (apply-fp-navigator.sh)
 etc/selinux/vendor_sepolicy.cil             e-ink and battery nodes reachable (apply-eink-access.sh, apply-battery-access.sh)
 etc/selinux/plat_pub_versioned.cil          Mudita's orphaned vendor types bound (fix-orphaned-vendor-types.sh)
-etc/init/hw/init.project.rc                 the matching permissions
+etc/init/hw/init.project.rc                 the matching permissions; the LED nodes to system (apply-lights-hal.sh)
+bin/hw/android.hardware.lights-service.mediatek   LineageOS's lights HAL under MediaTek's name (apply-lights-hal.sh)
 etc/init/hw/init.mt6761.usb.rc              no mass storage with adb + serial (apply-usb-no-mass-storage.sh)
 build.prop                                  ro.vendor.mtk_aod_support=1 and the build number (stamp-build-number.sh)
 ```

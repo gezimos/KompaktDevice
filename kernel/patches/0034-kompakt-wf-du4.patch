@@ -1,0 +1,124 @@
+Kompakt: a real 4-grey fast mode in the DU2 slot, kompakt_wf_du4
+
+meink sends waveform DU2 at 2 bpp (four grey values per pixel, mode byte
+0x2_), and no Kompakt mode uses it. Its stock records only drive greys to
+black or white. With kompakt_wf_du4 set, the loader rewrites the 14 DU2
+records so every level goes straight to every other level: one push of
+|V(dst) - V(src)| frames in the right direction, no reversals, where V is
+the charge potential the band's GL16 record follows exactly (net(s,t) =
+V(t) - V(s) for every pair; V(0) is taken as 0 because GL16's (0,0) holds
+a stock -1 in bands 8-10). Unchanged pixels are left alone.
+
+The drive follows the same V as GL16, GC16 and stock DU2, so mixing it
+with Quality leaves no net charge, unlike a2grey, which clipped every
+grey to A2's 7 frames. The record keeps the stock DU2 length (V(15)):
+15 frames at band 8, against 7 for A2 and 28 for GL16. Every source and
+destination level is filled, so it works whichever four of the sixteen
+levels the IC maps 2-bit values to.
+
+Checked before the build in a userspace harness against Mudita's blob
+under ASan and UBSan: all 14 bands built, every pair's net equals
+V(dst) - V(src), diagonal zero, no code 3, the length and the 0x20/0x22
+tables unchanged, the tail past N zero, and no other record touched.
+Off by default.
+
+--- a/drivers/misc/mudita/eink_loader/loader.c
++++ b/drivers/misc/mudita/eink_loader/loader.c
+@@ -971,6 +971,7 @@
+ #define WF_A2SHORT        0x4
+ /* Kompakt: experimental recipes, dialled from sysfs and carried in the flags word. */
+ #define WF_GL16TRIM       0x8             /* in wf_done: GL16 frames were dropped */
++#define WF_DU4            0x10            /* the DU2 slot drives every level directly: 4 greys at 2 bpp */
+ #define WF_A2N_SHIFT      8               /* A2 frame count, 0 = the band's own */
+ #define WF_A2N_MASK       0xfu
+ #define WF_GLT_SHIFT      12              /* GL16 frames dropped from the end, 0 = none */
+@@ -1098,6 +1099,32 @@
+         }
+         return done;
+     }
++    if (group == WF_DU2) {
++        const u8 *g16 = stock + gl * WF_REC;
++        int v[16], k;
++        unsigned int t;
++
++        if (!(flags & WF_DU4) || cls[gl] != WF_GL16)
++            return 0;
++        /* Kompakt: one charge potential per level, read from this band's GL16; the family fits it exactly. */
++        v[0] = 0;                               /* black itself: (0,0) carries a stock -1 in bands 8-10 */
++        for (t = 1; t < 16; t++)
++            v[t] = wf_net(g16, 0, t);
++        for (s = 0; s < 16; s++)
++            for (t = 0; t < 16; t++)
++                if (s != t && (wf_net(g16, s, t) != v[t] - v[s] || abs(v[t] - v[s]) > (int)n))
++                    return 0;                   /* not the balanced family, or longer than DU2: stay stock */
++        memset(out + 1, 0, (n + 1) * WF_FRAME);
++        out[0] = n;
++        /* One straight push of |V(dst) - V(src)| frames, no reversals: unchanged pixels are left alone. */
++        for (s = 0; s < 16; s++)
++            for (t = 0; t < 16; t++) {
++                k = v[t] - v[s];
++                for (f = 0; s != t && f < (unsigned int)abs(k); f++)
++                    wf_put(out, f, s, t, k > 0 ? 2 : 1);
++            }
++        return WF_DU4;
++    }
+     if (group != WF_A2)
+         return 0;
+ 
+@@ -1191,10 +1218,10 @@
+         WRITE_ONCE(*(u32 *)((u8 *)display + WF_DISP_BPP), 4);
+ 
+     /* crc and length match the lutd= field of refresh_time when this record went out */
+-    pr_info("kompakt-wf: upload %s band %u N=%u crc=%08x/%u%s%s%s%s\n", wf_name[group],
++    pr_info("kompakt-wf: upload %s band %u N=%u crc=%08x/%u%s%s%s%s%s\n", wf_name[group],
+             idx % WF_BANDS, rec[0], crc32_le(0, rec, rec[0] * WF_FRAME + 0x41),
+             rec[0] * WF_FRAME + 0x41,
+-            done ? "" : " stock", done & WF_GU16 ? " gu16" : "",
++            done ? "" : " stock", done & WF_GU16 ? " gu16" : "", done & WF_DU4 ? " du4" : "",
+             done & WF_GL16TRIM ? " gl16trim" : "",
+             done & WF_A2GREY ? (done & WF_A2SHORT ? " a2grey a2frames" : " a2grey")
+                              : (done & WF_A2SHORT ? " a2frames" : ""));
+@@ -1338,8 +1365,8 @@
+     if (err)
+         pr_err("kompakt-wf: transforms not applied (err %d)\n", err);
+     else
+-        pr_info("kompakt-wf: gu16=%d a2grey=%d a2frames=%u gl16trim=%u, %u record(s) rewritten, %s%s\n",
+-                !!(flags & WF_GU16), !!(flags & WF_A2GREY), WF_A2N(flags), WF_GLT(flags),
++        pr_info("kompakt-wf: gu16=%d du4=%d a2grey=%d a2frames=%u gl16trim=%u, %u record(s) rewritten, %s%s\n",
++                !!(flags & WF_GU16), !!(flags & WF_DU4), !!(flags & WF_A2GREY), WF_A2N(flags), WF_GLT(flags),
+                 changed, cur >= 0 ? "re-uploaded " : "applies at the next waveform change",
+                 cur >= 0 ? wf_name[wf_group(cur)] : "");
+     return err;
+@@ -1440,6 +1467,16 @@
+     return count;
+ }
+ 
++static ssize_t kompakt_wf_du4_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++    return wf_show(buf, WF_DU4);
++}
++static ssize_t kompakt_wf_du4_store(struct device *dev, struct device_attribute *attr,
++                                    const char *buf, size_t count)
++{
++    return wf_store(buf, count, WF_DU4);
++}
++
+ static ssize_t kompakt_wf_gu16_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+     return wf_show(buf, WF_GU16);
+@@ -1478,6 +1515,7 @@
+ }
+ 
+ static DEVICE_ATTR(kompakt_wf_gu16, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_gu16_show, kompakt_wf_gu16_store);
++static DEVICE_ATTR(kompakt_wf_du4, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_du4_show, kompakt_wf_du4_store);
+ static DEVICE_ATTR(kompakt_wf_a2grey, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_a2grey_show, kompakt_wf_a2grey_store);
+ static DEVICE_ATTR(kompakt_wf_a2short, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_a2short_show, kompakt_wf_a2short_store);
+ static DEVICE_ATTR(kompakt_wf_a2frames, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_a2frames_show, kompakt_wf_a2frames_store);
+@@ -1563,6 +1601,7 @@
+     &dev_attr_temperature_offset.attr,
+     &dev_attr_refresh_time.attr,
+     &dev_attr_kompakt_wf_gu16.attr,
++    &dev_attr_kompakt_wf_du4.attr,
+     &dev_attr_kompakt_wf_a2grey.attr,
+     &dev_attr_kompakt_wf_a2short.attr,
+     &dev_attr_kompakt_wf_a2frames.attr,

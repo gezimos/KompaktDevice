@@ -1,0 +1,188 @@
+Kompakt: the waveform switches become dials, for recipe experiments
+
+a2short was one fixed recipe, A2 at 5 frames, and only where the band's
+own record had 7. kompakt_wf_a2frames takes any count from 2 to 6 and
+applies it in every temperature band (0 is stock; a2short stays as the
+alias for 5). kompakt_wf_gl16trim drops that many frames from the end of
+the GL16 recipe, never below 4, and combines with gu16. Both carry their
+value in fields of the flags word, so a write re-uploads at once, and the
+upload log names them.
+
+--- a/drivers/misc/mudita/eink_loader/loader.c
++++ b/drivers/misc/mudita/eink_loader/loader.c
+@@ -821,6 +821,15 @@
+ #define WF_GU16           0x1
+ #define WF_A2GREY         0x2
+ #define WF_A2SHORT        0x4
++/* Kompakt: experimental recipes, dialled from sysfs and carried in the flags word. */
++#define WF_GL16TRIM       0x8             /* in wf_done: GL16 frames were dropped */
++#define WF_A2N_SHIFT      8               /* A2 frame count, 0 = the band's own */
++#define WF_A2N_MASK       0xfu
++#define WF_GLT_SHIFT      12              /* GL16 frames dropped from the end, 0 = none */
++#define WF_GLT_MASK       0x1fu
++#define WF_A2N(flags)     (((flags) >> WF_A2N_SHIFT) & WF_A2N_MASK)
++#define WF_GLT(flags)     (((flags) >> WF_GLT_SHIFT) & WF_GLT_MASK)
++#define WF_GL16_MIN_N     4               /* never trim a GL16 record below this */
+ 
+ enum { WF_INIT, WF_A2, WF_DU2, WF_GL16, WF_GC16, WF_OTHER };
+ static const char * const wf_name[] = { "INIT", "A2", "DU2", "GL16", "GC16", "other" };
+@@ -923,17 +932,31 @@
+     if (cls[idx] != group)
+         return 0;                               /* content disagrees with its slot */
+ 
+-    if (group == WF_GL16 && (flags & WF_GU16)) {
+-        for (f = 0; f < n; f++)
+-            for (s = 0; s < 16; s++)
+-                wf_put(out, f, s, s, 0);
+-        return WF_GU16;
++    if (group == WF_GL16) {
++        unsigned int trim = WF_GLT(flags);
++
++        /* Kompakt: drop the last frames of the recipe; the tail past the record must stay zero. */
++        if (trim && n > trim && n - trim >= WF_GL16_MIN_N) {
++            nn = n - trim;
++            memset(out + 1 + nn * WF_FRAME, 0, (n - nn + 1) * WF_FRAME);
++            out[0] = nn;
++            done |= WF_GL16TRIM;
++        }
++        if (flags & WF_GU16) {
++            for (f = 0; f < nn; f++)
++                for (s = 0; s < 16; s++)
++                    wf_put(out, f, s, s, 0);
++            done |= WF_GU16;
++        }
++        return done;
+     }
+     if (group != WF_A2)
+         return 0;
+ 
+-    if ((flags & WF_A2SHORT) && n == WF_A2_STOCK_N) {
+-        nn = WF_A2_SHORT_N;
++    /* Kompakt: any frame count below the band's own; a2short is the alias for 5. */
++    w = WF_A2N(flags);
++    if (w && w < n) {
++        nn = w;
+         done |= WF_A2SHORT;
+     }
+     if ((flags & WF_A2GREY) && cls[gl] == WF_GL16) {
+@@ -1016,12 +1039,13 @@
+     const u8 *rec = wf_live + idx * WF_REC;
+ 
+     /* crc and length match the lutd= field of refresh_time when this record went out */
+-    pr_info("kompakt-wf: upload %s band %u N=%u crc=%08x/%u%s%s%s\n", wf_name[group],
++    pr_info("kompakt-wf: upload %s band %u N=%u crc=%08x/%u%s%s%s%s\n", wf_name[group],
+             idx % WF_BANDS, rec[0], crc32_le(0, rec, rec[0] * WF_FRAME + 0x41),
+             rec[0] * WF_FRAME + 0x41,
+             done ? "" : " stock", done & WF_GU16 ? " gu16" : "",
+-            done & WF_A2GREY ? (done & WF_A2SHORT ? " a2grey a2short" : " a2grey")
+-                             : (done & WF_A2SHORT ? " a2short" : ""));
++            done & WF_GL16TRIM ? " gl16trim" : "",
++            done & WF_A2GREY ? (done & WF_A2SHORT ? " a2grey a2frames" : " a2grey")
++                             : (done & WF_A2SHORT ? " a2frames" : ""));
+     return ret;
+ }
+ 
+@@ -1162,8 +1186,8 @@
+     if (err)
+         pr_err("kompakt-wf: transforms not applied (err %d)\n", err);
+     else
+-        pr_info("kompakt-wf: gu16=%d a2grey=%d a2short=%d, %u record(s) rewritten, %s%s\n",
+-                !!(flags & WF_GU16), !!(flags & WF_A2GREY), !!(flags & WF_A2SHORT),
++        pr_info("kompakt-wf: gu16=%d a2grey=%d a2frames=%u gl16trim=%u, %u record(s) rewritten, %s%s\n",
++                !!(flags & WF_GU16), !!(flags & WF_A2GREY), WF_A2N(flags), WF_GLT(flags),
+                 changed, cur >= 0 ? "re-uploaded " : "applies at the next waveform change",
+                 cur >= 0 ? wf_name[wf_group(cur)] : "");
+     return err;
+@@ -1197,6 +1221,29 @@
+         return -EINVAL;
+     mutex_lock(&wf_mutex);
+     flags = on ? (wf_flags | bit) : (wf_flags & ~bit);
++    err = wf_apply(flags);                      /* rewriting a value forces a re-upload */
++    if (!err)
++        WRITE_ONCE(wf_flags, flags);
++    mutex_unlock(&wf_mutex);
++    return err ? err : count;
++}
++
++/* Kompakt: a numeric dial in a field of the flags word; 0 means stock, else lo..hi. */
++static ssize_t wf_show_val(char *buf, unsigned int shift, unsigned int mask)
++{
++    return snprintf(buf, PAGE_SIZE, "%u\n", (READ_ONCE(wf_flags) >> shift) & mask);
++}
++
++static ssize_t wf_store_val(const char *buf, size_t count, unsigned int shift, unsigned int mask,
++                            unsigned int lo, unsigned int hi)
++{
++    unsigned int flags, v;
++    int err;
++
++    if (kstrtouint(buf, 10, &v) || (v && (v < lo || v > hi)))
++        return -EINVAL;
++    mutex_lock(&wf_mutex);
++    flags = (wf_flags & ~(mask << shift)) | (v << shift);
+     err = wf_apply(flags);                      /* rewriting a value forces a re-upload */
+     if (!err)
+         WRITE_ONCE(wf_flags, flags);
+@@ -1204,6 +1251,25 @@
+     return err ? err : count;
+ }
+ 
++static ssize_t kompakt_wf_a2frames_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++    return wf_show_val(buf, WF_A2N_SHIFT, WF_A2N_MASK);
++}
++static ssize_t kompakt_wf_a2frames_store(struct device *dev, struct device_attribute *attr,
++                                         const char *buf, size_t count)
++{
++    return wf_store_val(buf, count, WF_A2N_SHIFT, WF_A2N_MASK, 2, 6);
++}
++static ssize_t kompakt_wf_gl16trim_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++    return wf_show_val(buf, WF_GLT_SHIFT, WF_GLT_MASK);
++}
++static ssize_t kompakt_wf_gl16trim_store(struct device *dev, struct device_attribute *attr,
++                                         const char *buf, size_t count)
++{
++    return wf_store_val(buf, count, WF_GLT_SHIFT, WF_GLT_MASK, 1, 24);
++}
++
+ static ssize_t kompakt_wf_gu16_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+     return wf_show(buf, WF_GU16);
+@@ -1228,18 +1294,24 @@
+ 
+ static ssize_t kompakt_wf_a2short_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+-    return wf_show(buf, WF_A2SHORT);
++    return snprintf(buf, PAGE_SIZE, "%d\n", WF_A2N(READ_ONCE(wf_flags)) == WF_A2_SHORT_N);
+ }
+-
+ static ssize_t kompakt_wf_a2short_store(struct device *dev, struct device_attribute *attr,
+                                         const char *buf, size_t count)
+ {
+-    return wf_store(buf, count, WF_A2SHORT);
++    int on;
++
++    /* Kompakt: the old switch is a2frames 5 or stock. */
++    if (kstrtoint(buf, 10, &on) || (on != 0 && on != 1))
++        return -EINVAL;
++    return wf_store_val(on ? "5" : "0", count, WF_A2N_SHIFT, WF_A2N_MASK, 2, 6);
+ }
+ 
+ static DEVICE_ATTR(kompakt_wf_gu16, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_gu16_show, kompakt_wf_gu16_store);
+ static DEVICE_ATTR(kompakt_wf_a2grey, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_a2grey_show, kompakt_wf_a2grey_store);
+ static DEVICE_ATTR(kompakt_wf_a2short, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_a2short_show, kompakt_wf_a2short_store);
++static DEVICE_ATTR(kompakt_wf_a2frames, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_a2frames_show, kompakt_wf_a2frames_store);
++static DEVICE_ATTR(kompakt_wf_gl16trim, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_gl16trim_show, kompakt_wf_gl16trim_store);
+ 
+ static DEVICE_ATTR(refresh_time, S_IWUSR|S_IWGRP | S_IRUGO, refresh_time_show, refresh_time_store);
+ static DEVICE_ATTR(pixelbits, S_IWUSR|S_IWGRP | S_IRUGO, pixelbits_show, pixelbits_store);
+@@ -1283,6 +1355,8 @@
+     &dev_attr_kompakt_wf_gu16.attr,
+     &dev_attr_kompakt_wf_a2grey.attr,
+     &dev_attr_kompakt_wf_a2short.attr,
++    &dev_attr_kompakt_wf_a2frames.attr,
++    &dev_attr_kompakt_wf_gl16trim.attr,
+ 
+ 	NULL,
+ };

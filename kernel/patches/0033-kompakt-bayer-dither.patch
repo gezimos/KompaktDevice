@@ -1,0 +1,331 @@
+Kompakt: ordered (Bayer) dithering as an option, kompakt_wf_dither
+
+meink has one dither algorithm, Floyd-Steinberg, run on every frame; its
+dither_type node is on or off and dither_param changes nothing visible.
+Error diffusion re-decides every pixel from its neighbours, so a moving
+picture boils and scrolling text crawls. An ordered matrix decides each
+pixel from its position alone: the pattern stands still between frames
+and a changed region changes only where the picture did.
+
+The loader already wraps meink's frame entry (eink_update_screen) for the
+sleep image, and meink copies the frame it is handed (renderWriteImage
+memcpy), so the loader dithers into its own 32-bit copy and passes that.
+meink greys a pixel as the sum of its three low bytes; the copy holds
+pure 0 or 255 in all three, which every gamma and contrast maps to black
+and white. Every dither request (the app's dither_type write, Auto's
+moving and settled phases) goes through kompakt_set_dither: with
+kompakt_wf_dither set, meink's dithering stays off and the loader's
+Bayer pass is on for exactly the frames that would have been FS dithered.
+0 is stock (meink FS), 1 Bayer 8x8 (64 levels), 2 Bayer 4x4 (coarser),
+3 the hybrid below.
+A write re-routes the current state and repaints. Off by default.
+
+kompakt_wf_dither_cut takes "lo hi" on a 0..255 grey (default 48 208):
+at or below lo is black, at or above hi is white, and only the greys in
+between are patterned, so near-white backgrounds and the light edge
+pixels of text stay clean. The matrix is spread over that range.
+
+3 is ordered error diffusion (J. van der Zwan): Atkinson's diffusion,
+which passes on 6/8 of each pixel's error and so keeps highlights and
+shadows clean, rounding against a Bayer 8x8 threshold held near the
+middle. kompakt_wf_dither_step sets that spread (0 plain Atkinson, 32
+full Bayer, default 8). Greys outside the cut range are pure and pass no
+error on, so text and white backgrounds stay clean here too.
+
+--- a/drivers/misc/mudita/eink_loader/loader.c
++++ b/drivers/misc/mudita/eink_loader/loader.c
+@@ -47,6 +47,41 @@
+ #define KOMPAKT_MEINK_RENDER     0x8
+ #define KOMPAKT_RENDER_SKIP_CLEAR 0x244
+ 
++/* Kompakt: ordered (Bayer) dithering in the loader instead of meink's Floyd-Steinberg. */
++#define KOMPAKT_FB_W     480
++#define KOMPAKT_FB_H     800
++#define KOMPAKT_FB_BYTES (KOMPAKT_FB_W * KOMPAKT_FB_H * 4)
++static int kompakt_dither;              /* kompakt_wf_dither: 0 meink FS, 1 Bayer 8x8, 2 Bayer 4x4, 3 Atkinson over Bayer */
++static int kompakt_dither_req;          /* the dither type last asked for, by the app or Auto */
++static bool kompakt_bayer_on;
++static u8 *kompakt_bayer_buf;
++static unsigned int kompakt_cut_lo = 48;    /* kompakt_wf_dither_cut: at or below goes black */
++static unsigned int kompakt_cut_hi = 208;   /* at or above goes white; only greys in between are patterned */
++static u16 kompakt_thr8[64], kompakt_thr4[16];
++static int kompakt_step = 8;            /* kompakt_wf_dither_step: Bayer spread of the hybrid, 32 is full Bayer */
++static s16 kompakt_hthr[64];
++static s16 *kompakt_err;                /* three rows of diffused error, two pixels of padding each side */
++#define KOMPAKT_ERR_ROW (KOMPAKT_FB_W + 4)
++extern void kompakt_request_repaint(void);
++
++static const u8 kompakt_bayer8[64] = {
++     0, 32,  8, 40,  2, 34, 10, 42,
++    48, 16, 56, 24, 50, 18, 58, 26,
++    12, 44,  4, 36, 14, 46,  6, 38,
++    60, 28, 52, 20, 62, 30, 54, 22,
++     3, 35, 11, 43,  1, 33,  9, 41,
++    51, 19, 59, 27, 49, 17, 57, 25,
++    15, 47,  7, 39, 13, 45,  5, 37,
++    63, 31, 55, 23, 61, 29, 53, 21,
++};
++static const u8 kompakt_bayer4[16] = {
++     0,  8,  2, 10,
++    12,  4, 14,  6,
++     3, 11,  1,  9,
++    15,  7, 13,  5,
++};
++
++
+ extern void eink_auto_enable(int on, void (*apply)(int moving));
+ extern int  eink_auto_state(void);
+ 
+@@ -141,6 +176,112 @@
+ }
+ 
+ 
++/* Every dither request passes here; with kompakt_wf_dither set, meink's FS stays off and the loader dithers. */
++static void kompakt_set_dither(int type)
++{
++    WRITE_ONCE(kompakt_dither_req, type);
++    if (type && READ_ONCE(kompakt_dither)) {
++        EinkSetDitheringType(g_einkData.einkDrv, kEinkDitheringTypeNotSpecified);
++        WRITE_ONCE(kompakt_bayer_on, true);
++    } else {
++        WRITE_ONCE(kompakt_bayer_on, false);
++        EinkSetDitheringType(g_einkData.einkDrv, (enum EInkDitheringType)type);
++    }
++}
++
++/* Spread each matrix cell over the cut range, on meink's grey scale (the sum of three bytes, 0..765). */
++static void kompakt_bayer_thresholds(void)
++{
++    unsigned int lo = kompakt_cut_lo * 3, span = (kompakt_cut_hi - kompakt_cut_lo) * 3, i;
++
++    for (i = 0; i < 64; i++)
++        kompakt_thr8[i] = lo + (kompakt_bayer8[i] * 2 + 1) * span / 128;
++    for (i = 0; i < 16; i++)
++        kompakt_thr4[i] = lo + (kompakt_bayer4[i] * 2 + 1) * span / 32;
++    for (i = 0; i < 64; i++)
++        kompakt_hthr[i] = 128 + (kompakt_bayer8[i] * 2 - 63) * kompakt_step / 16;
++}
++
++/*
++ * Ordered error diffusion (J. van der Zwan): Atkinson's diffusion, whose 6/8 error keeps
++ * highlights and shadows clean, rounding against a Bayer threshold held close to the middle.
++ */
++static void *kompakt_hybrid(const void *src)
++{
++    const u32 *in = src;
++    u32 *out;
++    int x;                              /* signed: the diffusion writes to x - 1 */
++    unsigned int y;
++    int lo = READ_ONCE(kompakt_cut_lo), hi = READ_ONCE(kompakt_cut_hi);
++
++    if (!kompakt_bayer_buf)
++        kompakt_bayer_buf = vmalloc(KOMPAKT_FB_BYTES);
++    if (!kompakt_err)
++        kompakt_err = vmalloc(3 * KOMPAKT_ERR_ROW * sizeof(s16));
++    if (!kompakt_bayer_buf || !kompakt_err)
++        return NULL;
++    memset(kompakt_err, 0, 3 * KOMPAKT_ERR_ROW * sizeof(s16));
++    out = (u32 *)kompakt_bayer_buf;
++    for (y = 0; y < KOMPAKT_FB_H; y++) {
++        s16 *e0 = kompakt_err + (y % 3) * KOMPAKT_ERR_ROW + 2;
++        s16 *e1 = kompakt_err + ((y + 1) % 3) * KOMPAKT_ERR_ROW + 2;
++        s16 *e2 = kompakt_err + ((y + 2) % 3) * KOMPAKT_ERR_ROW + 2;
++        const s16 *row = kompakt_hthr + (y & 7) * 8;
++
++        memset(e2 - 2, 0, KOMPAKT_ERR_ROW * sizeof(s16));  /* it held row y - 1 */
++        for (x = 0; x < KOMPAKT_FB_W; x++, in++, out++) {
++            u32 p = *in;
++            int g = (((p & 0xff) + ((p >> 8) & 0xff) + ((p >> 16) & 0xff)) * 85) >> 8;
++            int v, q, e;
++
++            /* Outside the cut range the pixel is pure and passes no error on. */
++            if (g >= hi || g <= lo) {
++                *out = (p & 0xff000000) | (g >= hi ? 0x00ffffff : 0);
++                continue;
++            }
++            v = g + e0[x];
++            q = v > row[x & 7] ? 255 : 0;
++            *out = (p & 0xff000000) | (q ? 0x00ffffff : 0);
++            e = (v - q) / 8;
++            e0[x + 1] += e;
++            e0[x + 2] += e;
++            e1[x - 1] += e;
++            e1[x] += e;
++            e1[x + 1] += e;
++            e2[x] += e;
++        }
++    }
++    return kompakt_bayer_buf;
++}
++
++/* meink greys a pixel as the sum of its three low bytes (0..765); threshold that against the tiled matrix. */
++static void *kompakt_bayer(const void *src)
++{
++    const u32 *in = src;
++    u32 *out;
++    unsigned int x, y;
++    int coarse = READ_ONCE(kompakt_dither) == 2;
++    unsigned int lo = READ_ONCE(kompakt_cut_lo) * 3, hi = READ_ONCE(kompakt_cut_hi) * 3;
++
++    if (!kompakt_bayer_buf)
++        kompakt_bayer_buf = vmalloc(KOMPAKT_FB_BYTES);
++    if (!kompakt_bayer_buf)
++        return NULL;
++    out = (u32 *)kompakt_bayer_buf;
++    for (y = 0; y < KOMPAKT_FB_H; y++) {
++        const u16 *row = coarse ? kompakt_thr4 + (y & 3) * 4 : kompakt_thr8 + (y & 7) * 8;
++
++        for (x = 0; x < KOMPAKT_FB_W; x++, in++, out++) {
++            u32 p = *in;
++            unsigned int sum = (p & 0xff) + ((p >> 8) & 0xff) + ((p >> 16) & 0xff);
++            bool white = sum >= hi || (sum > lo && sum > row[coarse ? x & 3 : x & 7]);
++
++            *out = (p & 0xff000000) | (white ? 0x00ffffff : 0);
++        }
++    }
++    return kompakt_bayer_buf;
++}
++
+ /* Fast and quality states for auto mode. Gamma, contrast and brightness are
+  * left as the user set them.
+  */
+@@ -163,13 +304,11 @@
+         EinkSetWaveformType(g_einkData.einkDrv, kEinkWaveformA2);
+         EinkSetBpp(g_einkData.einkDrv, 1);
+         EinkSetDitheringParameter(g_einkData.einkDrv, 160);
+-        EinkSetDitheringType(g_einkData.einkDrv,
+-                             kEinkDitheringTypeFloydSteinbergOpt1);
++        kompakt_set_dither(kEinkDitheringTypeFloydSteinbergOpt1);
+     } else {
+         EinkSetWaveformType(g_einkData.einkDrv, kEinkWaveformGL16);
+         EinkSetBpp(g_einkData.einkDrv, 4);
+-        EinkSetDitheringType(g_einkData.einkDrv,
+-                             kEinkDitheringTypeNotSpecified);
++        kompakt_set_dither(kEinkDitheringTypeNotSpecified);
+     }
+ }
+ 
+@@ -363,7 +502,7 @@
+         return -EINVAL;
+     if (type < kEinkDithering_count)
+     {
+-        EinkSetDitheringType(g_einkData.einkDrv, (enum EInkDitheringType)type);
++        kompakt_set_dither(type);
+     }
+     return count;
+ }
+@@ -1281,6 +1420,24 @@
+                                          const char *buf, size_t count)
+ {
+     return wf_store_val(buf, count, WF_GLT_SHIFT, WF_GLT_MASK, 1, 24);
++}
++
++static ssize_t kompakt_wf_dither_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++    return snprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(kompakt_dither));
++}
++static ssize_t kompakt_wf_dither_store(struct device *dev, struct device_attribute *attr,
++                                       const char *buf, size_t count)
++{
++    unsigned int v;
++
++    if (kstrtouint(buf, 10, &v) || v > 3)
++        return -EINVAL;
++    WRITE_ONCE(kompakt_dither, v);
++    kompakt_set_dither(READ_ONCE(kompakt_dither_req));  /* re-route whatever is dithering now */
++    kompakt_request_repaint();
++    pr_info("einkwf: dither=%u (0 meink FS, 1 Bayer 8x8, 2 Bayer 4x4, 3 Atkinson over Bayer)\n", v);
++    return count;
+ }
+ 
+ static ssize_t kompakt_wf_gu16_show(struct device *dev, struct device_attribute *attr, char *buf)
+@@ -1325,7 +1482,47 @@
+ static DEVICE_ATTR(kompakt_wf_a2short, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_a2short_show, kompakt_wf_a2short_store);
+ static DEVICE_ATTR(kompakt_wf_a2frames, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_a2frames_show, kompakt_wf_a2frames_store);
+ static DEVICE_ATTR(kompakt_wf_gl16trim, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_gl16trim_show, kompakt_wf_gl16trim_store);
++static DEVICE_ATTR(kompakt_wf_dither, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_dither_show, kompakt_wf_dither_store);
++
++static ssize_t kompakt_wf_dither_cut_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++    return snprintf(buf, PAGE_SIZE, "%u %u\n", READ_ONCE(kompakt_cut_lo), READ_ONCE(kompakt_cut_hi));
++}
++static ssize_t kompakt_wf_dither_cut_store(struct device *dev, struct device_attribute *attr,
++                                           const char *buf, size_t count)
++{
++    unsigned int lo, hi;
++
++    if (sscanf(buf, "%u %u", &lo, &hi) != 2 || hi > 255 || lo + 8 > hi)
++        return -EINVAL;
++    WRITE_ONCE(kompakt_cut_lo, lo);
++    WRITE_ONCE(kompakt_cut_hi, hi);
++    kompakt_bayer_thresholds();
++    kompakt_request_repaint();
++    pr_info("einkwf: dither cut %u..%u\n", lo, hi);
++    return count;
++}
++static DEVICE_ATTR(kompakt_wf_dither_cut, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_dither_cut_show, kompakt_wf_dither_cut_store);
++
++static ssize_t kompakt_wf_dither_step_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++    return snprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(kompakt_step));
++}
++static ssize_t kompakt_wf_dither_step_store(struct device *dev, struct device_attribute *attr,
++                                            const char *buf, size_t count)
++{
++    unsigned int v;
+ 
++    if (kstrtouint(buf, 10, &v) || v > 32)
++        return -EINVAL;
++    WRITE_ONCE(kompakt_step, v);
++    kompakt_bayer_thresholds();
++    kompakt_request_repaint();
++    pr_info("einkwf: dither step %u (0 plain Atkinson, 32 full Bayer)\n", v);
++    return count;
++}
++static DEVICE_ATTR(kompakt_wf_dither_step, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_dither_step_show, kompakt_wf_dither_step_store);
++
+ static DEVICE_ATTR(refresh_time, S_IWUSR|S_IWGRP | S_IRUGO, refresh_time_show, refresh_time_store);
+ static DEVICE_ATTR(pixelbits, S_IWUSR|S_IWGRP | S_IRUGO, pixelbits_show, pixelbits_store);
+ static DEVICE_ATTR(waveform_mode, S_IWUSR|S_IWGRP | S_IRUGO, waveform_type_show, waveform_type_store);
+@@ -1370,6 +1567,9 @@
+     &dev_attr_kompakt_wf_a2short.attr,
+     &dev_attr_kompakt_wf_a2frames.attr,
+     &dev_attr_kompakt_wf_gl16trim.attr,
++    &dev_attr_kompakt_wf_dither.attr,
++    &dev_attr_kompakt_wf_dither_cut.attr,
++    &dev_attr_kompakt_wf_dither_step.attr,
+ 
+ 	NULL,
+ };
+@@ -1406,6 +1606,7 @@
+     g_einkData.einkDrv = einkDrv;
+     dev_set_drvdata(&spi->dev, &g_einkData);
+     /* meink has just registered its frame hook inside EinkInit; wrap it now. */
++    kompakt_bayer_thresholds();
+     kompakt_hold_init();
+     register_reboot_notifier(&kompakt_reboot_nb);
+ 
+@@ -1523,6 +1724,12 @@
+         pr_info("kompakt-sleepimg: frame %d held off the sleep screen\n",
+                 atomic_inc_return(&kompakt_held));
+         return 0;
++    }
++    if (READ_ONCE(kompakt_bayer_on)) {
++        void *d = READ_ONCE(kompakt_dither) == 3 ? kompakt_hybrid(ptr) : kompakt_bayer(ptr);
++
++        if (d)
++            return meink_update(d);
+     }
+     return meink_update(ptr);
+ }
+@@ -1589,6 +1796,10 @@
+ 
+ static void kompakt_hold_exit(void)
+ {
++    vfree(kompakt_bayer_buf);
++    kompakt_bayer_buf = NULL;
++    vfree(kompakt_err);
++    kompakt_err = NULL;
+     if (!meink_update)
+         return;
+     register_eink_refresh_func(meink_update);

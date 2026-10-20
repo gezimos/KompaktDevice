@@ -36,9 +36,18 @@ and comes from the vendor partition.
 | `0023-kompakt-recovery-black-on-white.patch` | recovery and fastbootd in black on white |
 | `0024-kompakt-usb-serial-null-tty.patch` | fixes a panic at USB plug-in when the serial port closes as the host opens it |
 | `0025-kompakt-gpu-sync-lockup-recovery.patch` | keeps the GPU's sync lockup recovery on, so a dead fence cannot freeze the always-on display |
+| `0026-kompakt-battery-capacity.patch` | full charge, charge counter and design capacity are the 3037 mAh this phone charges the cell to, so battery health reads 100% and the mAh figures add up |
+| `0027-kompakt-notification-led.patch` | the notification LED takes brightness levels and the timed nodes LineageOS's lights HAL breathes it through |
+| `0028-kompakt-led-level-log.patch` | one kernel line (`kompakt-led:`, visible in logcat) per light change: the level set, and for a timed light the duty peak it came from |
+| `0029-kompakt-led-pwm-dimming.patch` | a steady notification light dims by the chip's 1 kHz PWM duty in 32 steps at full current; a breathing one by its peak current; the log line reads the DIM and ISINK registers back |
+| `0030-kompakt-wf-dials.patch` | the waveform switches become dials: `kompakt_wf_a2frames` (2 to 6, every band) and `kompakt_wf_gl16trim` (frames dropped from the end of GL16, never below 4); `a2short` stays as the alias for 5. Experiments, off by default |
+| `0031-kompakt-a2grey-bpp.patch` | `kompakt_wf_a2grey` works: after an A2 upload that carries the grey record, the loader's set-waveform hook lifts meink's bit depth to 4 (meink's own `pixelbits` setter is a no-op and A2 is 1 bpp by its table). Experiment, off by default |
+| `0032-kompakt-auto-no-burst-flash.patch` | Auto's moving phase sets meink's one-shot skip-clear flag (render `+0x244`) before its GL16 to A2 switch, so a scroll burst no longer starts with a black and white flash |
+| `0033-kompakt-bayer-dither.patch` | `kompakt_wf_dither`: `1` or `2` replaces meink's Floyd-Steinberg with an ordered Bayer pass (8x8 or 4x4) done in the loader, on exactly the frames the app or Auto asked to dither; the pattern stands still between frames. `kompakt_wf_dither_cut` (default `48 208`) leaves greys outside that range pure black or white, so light backgrounds and text edges get no dots. `3` is ordered error diffusion: Atkinson rounding against a Bayer threshold near the middle, spread by `kompakt_wf_dither_step`. `0` (default) is stock |
+| `0034-kompakt-wf-du4.patch` | `kompakt_wf_du4`: the DU2 slot (2 bpp, unused by any mode) drives every grey straight to every other in one push of the GL16 family's charge difference, a balanced 4-grey fast mode at about half of Quality's time. Use with `waveform_mode DU2`. Off by default |
 | `withdrawn/0022-kompakt-spi-write-clock.patch` | not applied: a faster SPI clock, after which the panel stopped refreshing. Kept as a record |
 
-Applying 0020, 0021, 0023, 0024 and 0025 reproduces the shipping kernel tree exactly.
+Applying 0020, 0021, 0023, 0024, 0025 and 0026 reproduces the shipping kernel tree exactly.
 
 ## Build
 

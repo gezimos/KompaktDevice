@@ -67,7 +67,7 @@ Owned `system:system`. Values are text with a trailing newline.
 | node | read | write |
 |---|---|---|
 | `waveform_mode` | current waveform | `A2`, `DU2`, `DU4`, `GL16`, `GC16`, `AUTO`; `KAUTO` for Auto mode (§9) |
-| `pixelbits` | bits per pixel | `1`, `2` or `4` |
+| `pixelbits` | bits per pixel | `1`, `2` or `4`; meink ignores the write and sets the depth from the waveform (A2 1, DU2 2, else 4). With `kompakt_wf_a2grey` on, our loader lifts A2 to 4 |
 | `gamma` | gamma level | `-1` = 1.00, `0` = 0.25, `1` = 0.50, `2` = 0.75, `3` = 1.25, `4` = 1.50, `5` = 2.00, `6` = 2.20 |
 | `contrast` | contrast | 0 to 255; `10` is neutral |
 | `brightness` | brightness | 0 to 255; `100` is neutral |
@@ -78,6 +78,14 @@ Owned `system:system`. Values are text with a trailing newline.
 | `refresh_mode` | meink's refresh mode, `deep` by default | a name meink knows; KompaktOS leaves it alone |
 | `manual_mode` | `1` | `1`: use the waveform in `waveform_mode`. `0`: meink chooses, with full, flashing refreshes |
 | `fps_limit` | meink's frame rate cap | a number; stock is 62 |
+| `kompakt_wf_gu16` | Quality (GL16) leaves unchanged pixels undriven | `0` or `1`; experiment, off by default |
+| `kompakt_wf_a2grey` | Fast (A2) with real grey levels, from the Quality table, at 4 bits | `0` or `1`; experiment, off by default |
+| `kompakt_wf_a2frames` | frames of the Fast (A2) recipe, in every temperature band | `0` (stock) or `2` to `6`; `kompakt_wf_a2short` is the alias for `5` |
+| `kompakt_wf_gl16trim` | frames dropped from the end of the Quality (GL16) recipe | `0` (stock) or `1` to `24`, never below 4 frames left |
+| `kompakt_wf_dither` | dither pattern for Fast + dither and Auto's moving phase | `0` meink's Floyd-Steinberg, `1` Bayer 8x8, `2` Bayer 4x4 (coarser), `3` Atkinson diffusion over a Bayer threshold (ordered error diffusion); runs in the loader with meink's dithering off |
+| `kompakt_wf_dither_cut` | the grey range the Bayer pattern covers | `lo hi` on 0 to 255, default `48 208`: at or below `lo` is black, at or above `hi` white, so near-white and text edges stay clean |
+| `kompakt_wf_du4` | 4-grey fast mode in the DU2 slot | `0` or `1`; then `waveform_mode DU2`. Balanced with Quality, about half its time |
+| `kompakt_wf_dither_step` | Bayer spread of mode `3` | `0` (plain Atkinson) to `32` (full Bayer), default `8` |
 | `clear` | – | `0` or `1`: flash white or black, then repaint the current frame |
 | `power` | panel power | `1` on, `0` off |
 | `eink_temperature` | panel temperature, °C | a temperature offset (§10) |
@@ -142,7 +150,7 @@ reboot restores the defaults.
 | `partial_full_every` | 24 | after this many partial updates, send one full frame to clear residue |
 | `semi_partial` | 1 | when a full frame goes out, refresh only the band that changed (§7) |
 | `semi_window` | 1 | narrow the controller's window to that band too. Leave at 1 |
-| `deghost_every` | 8 | run meink's screen-off de-ghost flash on every Nth sleep; `1` = always |
+| `deghost_every` | 8 (the Kompakt app sets 1 at boot) | run meink's screen-off de-ghost flash on every Nth sleep; `1` = always |
 | `auto_busy_pct` | 25 | share of screen rows changed that counts as movement (§9) |
 | `auto_busy_frames` | 1 | moving frames in a row before Auto switches to fast |
 | `auto_idle_ms` | 2000 | quiet time before Auto settles back to quality |
@@ -197,7 +205,8 @@ turn. It is not applied to the forced full frames above or to the
 `partial_full_every` pass, whose purpose is to drive what has not changed.
 
 **Screen-off de-ghost.** On screen-off meink flashes the panel white, then
-black. `meink_hal` lets that through only on every `deghost_every`th sleep.
+black. `meink_hal` lets that through only on every `deghost_every`th sleep;
+the Kompakt app sets it to 1 at boot, so every lock is cleared, as on stock.
 
 **Panel power.** If meink paints while the panel rail is off, `meink_hal` powers
 the panel on and resends its last configuration first.
@@ -235,7 +244,9 @@ framebuffer blank notifier while Android's display pipeline is still running,
 and Android's last frame before sleep (an opaque black scrim) could land after
 it. `meink_loader` wraps meink's frame hook and registers one notifier just
 before meink's and one just after; Android frames that arrive in between are
-dropped, and marked so the next identical frame is still sent.
+dropped, and marked so the next identical frame is still sent. A frame already
+inside meink when the first notifier runs is waited out (mtkfb holds
+`screen_buf_lock` across the call), so it lands before the picture, not after.
 
 ## 9. Auto mode
 

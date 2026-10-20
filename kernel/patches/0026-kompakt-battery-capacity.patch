@@ -1,0 +1,50 @@
+Kompakt: battery capacity is what this phone charges to
+
+The cell is rated 3300 mAh at 4.45 V; this phone charges it to 4.34 V, and
+Mudita's own gauge table for the cell (kompakt-base.dts, battery0_profile)
+holds 3037 mAh from there down to 3.0 V. Full charge reported MediaTek's
+stock g_Q_MAX (2946, never learned) and the design capacity our constant
+3000, so Android showed a fixed 98% battery health and a charge counter
+from the wrong total. Full charge, the charge counter and the design
+capacity all use 3037 now: health reads 100%, which is all this gauge can
+say, and the mAh figures add up.
+
+--- a/drivers/power/supply/mtk_battery.c
++++ b/drivers/power/supply/mtk_battery.c
+@@ -42,7 +42,8 @@
+ 	return -1;
+ }
+ 
+-#define KOMPAKT_DESIGN_CAPACITY_MAH 3000
++/* Kompakt: the cell as this phone charges it, to 4.34 V of its 4.45 V (Mudita's gauge table). */
++#define KOMPAKT_CAPACITY_MAH 3037
+ 
+ int __attribute__ ((weak))
+ 	mtk_battery_daemon_init(struct platform_device *pdev)
+@@ -308,14 +309,11 @@
+ 			* 100;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_FULL:
+-		val->intval =
+-			gm->fg_table_cust_data.fg_profile[
+-				gm->battery_id].q_max * 1000;
++		/* Kompakt: q_max is MediaTek's stock 2946, never learned. */
++		val->intval = KOMPAKT_CAPACITY_MAH * 1000;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_COUNTER:
+-		val->intval = gm->ui_soc *
+-			gm->fg_table_cust_data.fg_profile[
+-				gm->battery_id].q_max * 1000 / 100;
++		val->intval = gm->ui_soc * KOMPAKT_CAPACITY_MAH * 1000 / 100;
+ 		break;
+ 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+ 		gauge_get_property(GAUGE_PROP_BATTERY_VOLTAGE,
+@@ -360,7 +358,7 @@
+ 			POWER_SUPPLY_CAPACITY_LEVEL_UNKNOWN)
+ 			val->intval = 0;
+ 		else {
+-			int q_max_mah = KOMPAKT_DESIGN_CAPACITY_MAH;
++			int q_max_mah = KOMPAKT_CAPACITY_MAH;
+ 			int q_max_uah = 0;
+ 
+ 			if (q_max_mah <= 0)

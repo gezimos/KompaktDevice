@@ -3,13 +3,17 @@
 # hand, for adb sideload from our LineageOS recovery.
 #
 #   tools/make-full-ota.sh <lineage-tree> <signing key, no extension> <out.zip> \
-#       boot.img dtbo.img vbmeta.img system.img vendor.img product.img
+#       boot.img dtbo.img vbmeta.img system.img vendor.img product.img [md1img.img]
 #
 # Needs m otatools. The key is the release key our recovery trusts.
+# md1img is the modem firmware, one per A/B slot. MuditaOS updates write their
+# region's modem with every install; without it an install runs on whatever
+# modem the target slot last held (Global phones kept the old P6 in one slot).
+# Pass the md1img of the MuditaOS release the vendor comes from, unmodified.
 set -euo pipefail
 L=${1:?lineage tree}; KEY=${2:?key}; OUT=${3:?out.zip}
 BOOT=${4:?boot}; DTBO=${5:?dtbo}; VBMETA=${6:?vbmeta}; SYSTEM=${7:?system}; VENDOR=${8:?vendor}
-PRODUCT=${9:?product}
+PRODUCT=${9:?product}; MODEM=${10:-}
 H=$L/out/host/linux-x86
 W=$(mktemp -d); T=$W/tf
 trap 'rm -rf "$W"' EXIT
@@ -22,6 +26,10 @@ cp "$SYSTEM" $T/IMAGES/system.img
 cp "$VENDOR" $T/IMAGES/vendor.img
 cp "$PRODUCT" $T/IMAGES/product.img
 printf '%s\n' boot dtbo product system vbmeta vendor > $T/META/ab_partitions.txt
+if [ -n "$MODEM" ]; then
+  cp "$MODEM" $T/IMAGES/md1img.img
+  echo md1img >> $T/META/ab_partitions.txt
+fi
 
 # Mudita's super layout: one group, plain virtual A/B. No compression: with an
 # Android 12 vendor, a compressed update needs early boot to mount it through

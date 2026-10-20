@@ -1,0 +1,143 @@
+Kompakt: the notification LED dims a steady light by PWM duty
+
+The level the lights HAL asks for reached the sink current field (patch
+0028's log showed levels 1 to 6 arriving), yet a steady light looked the
+same at every level. A steady RGB light now runs in PWM mode at 1 kHz and
+full current with a duty of level/32, the chip's own dimming in 32 steps;
+max_brightness is 32 so the HAL's 0 to 255 maps onto them. A breathing
+light (the timed nodes) still sets the peak current, now scaled from the
+32 levels to the six current steps. The brightness read back for an RGB
+sink is the level it was given. The kernel log line now reads the DIM and
+ISINK registers back after each write, so what the chip holds is visible
+in logcat (tag kompakt-led).
+
+--- a/drivers/misc/mediatek/pmic/mt6370/mt6370_pmu_rgbled.c
++++ b/drivers/misc/mediatek/pmic/mt6370/mt6370_pmu_rgbled.c
+@@ -45,6 +45,14 @@
+ 	struct kompakt_led_pattern pat;
+ };
+ 
++/* Kompakt: the sink current for a lit RGB light, 4 mA a step. */
++#define KOMPAKT_ISINK_MAX	6
++
++static inline struct kompakt_led_pattern *kompakt_pat(struct led_classdev *led_cdev)
++{
++	return &container_of(led_cdev, struct mt6370_led_classdev, led_dev)->pat;
++}
++
+ struct mt6370_pmu_rgbled_data {
+ 	struct mt6370_pmu_chip *chip;
+ 	struct device *dev;
+@@ -1020,11 +1028,14 @@
+ 	},
+ };
+ /* 6372 end */
++static int mt6370_pmu_led_change_mode(struct led_classdev *led_cdev, int mode);
++
+ static void mt6370_pmu_led_bright_set(struct led_classdev *led_cdev,
+ 	enum led_brightness bright)
+ {
+ 	int led_index = mt6370_pmu_led_get_index(led_cdev);
+ 	uint8_t reg_addr = 0, reg_mask = 0x38, reg_shift = 3, en_mask = 0;
++	uint8_t dim_addr = 0, cur = bright;
+ 	bool need_enable_timer = true;
+ 	int ret = 0;
+ 
+@@ -1043,14 +1054,17 @@
+ 	switch (led_index) {
+ 	case MT6370_PMU_LED1:
+ 		reg_addr = MT6370_PMU_REG_RGB1ISINK;
++		dim_addr = MT6370_PMU_REG_RGB1DIM;
+ 		en_mask = 0x80;
+ 		break;
+ 	case MT6370_PMU_LED2:
+ 		reg_addr = MT6370_PMU_REG_RGB2ISINK;
++		dim_addr = MT6370_PMU_REG_RGB2DIM;
+ 		en_mask = 0x40;
+ 		break;
+ 	case MT6370_PMU_LED3:
+ 		reg_addr = MT6370_PMU_REG_RGB3ISINK;
++		dim_addr = MT6370_PMU_REG_RGB3DIM;
+ 		en_mask = 0x20;
+ 		break;
+ 	case MT6370_PMU_LED4:
+@@ -1062,12 +1076,26 @@
+ 	default:
+ 		dev_err(led_cdev->dev, "invalid mt led index\n");
+ 		return;
++	}
++	/* Kompakt: a steady light dims by 1 kHz PWM duty at full current, a breathing one by current. */
++	if (dim_addr && bright) {
++		if (kompakt_pat(led_cdev)->blink) {
++			cur = DIV_ROUND_UP(bright * KOMPAKT_ISINK_MAX, led_cdev->max_brightness);
++		} else {
++			mt6370_pmu_led_change_mode(led_cdev, MT6370_PMU_LED_PWMMODE);
++			mt6370_pmu_led_update_bits(led_cdev, dim_addr, MT6370_LED_PWMDUTYMASK,
++				min_t(int, bright, MT6370_LED_PWMDUTYMAX + 1) - 1);
++			cur = KOMPAKT_ISINK_MAX;
++		}
+ 	}
+ 	ret = mt6370_pmu_led_update_bits(led_cdev, reg_addr, reg_mask,
+-					 (bright & reg_mask) << reg_shift);
+-	/* Kompakt: one line per light change, for brightness reports (kernel log via logcat). */
+-	if (led_index != MT6370_PMU_LED4)
+-		pr_info("kompakt-led: %s level %d\n", led_cdev->name, bright);
++					 (cur & reg_mask) << reg_shift);
++	/* Kompakt: one line per light change, with the registers read back (kernel log via logcat). */
++	if (dim_addr)
++		pr_info("kompakt-led: %s level %d isink %d dim 0x%02x isinkreg 0x%02x\n",
++			led_cdev->name, bright, cur,
++			mt6370_pmu_led_reg_read(led_cdev, dim_addr),
++			mt6370_pmu_led_reg_read(led_cdev, reg_addr));
+ 	if (ret < 0) {
+ 		dev_err(led_cdev->dev, "update brightness fail\n");
+ 		return;
+@@ -1126,6 +1154,9 @@
+ 		return ret;
+ 	if (!(ret & en_mask))
+ 		return LED_OFF;
++	/* Kompakt: the RGB level is duty or current, not the sink field. */
++	if (need_enable_timer)
++		return led_cdev->brightness;
+ 	ret = mt6370_pmu_led_reg_read(led_cdev, reg_addr);
+ 	if (ret < 0)
+ 		return ret;
+@@ -1239,11 +1270,6 @@
+ 
+ /* Kompakt: the LineageOS lights HAL timed nodes on PMIC breathing (kernel patch 0027). */
+ static int mt6370_pmu_led_get_breath_regbase(struct led_classdev *led_cdev);
+-
+-static inline struct kompakt_led_pattern *kompakt_pat(struct led_classdev *led_cdev)
+-{
+-	return &container_of(led_cdev, struct mt6370_led_classdev, led_dev)->pat;
+-}
+ 
+ static u8 kompakt_breath_code(u32 ms, u32 base, u32 step)
+ {
+@@ -1445,7 +1471,7 @@
+ static struct mt6370_led_classdev mt6370_led_classdev[MT6370_PMU_MAXLED] = {
+ 	{
+ 		.led_dev =  {
+-			.max_brightness = 6,
++			.max_brightness = MT6370_LED_PWMDUTYMAX + 1,
+ 			.groups = kompakt_led_groups,
+ 			.brightness_set = mt6370_pmu_led_bright_set,
+ 			.brightness_get = mt6370_pmu_led_bright_get,
+@@ -1455,7 +1481,7 @@
+ 	},
+ 	{
+ 		.led_dev =  {
+-			.max_brightness = 6,
++			.max_brightness = MT6370_LED_PWMDUTYMAX + 1,
+ 			.groups = kompakt_led_groups,
+ 			.brightness_set = mt6370_pmu_led_bright_set,
+ 			.brightness_get = mt6370_pmu_led_bright_get,
+@@ -1465,7 +1491,7 @@
+ 	},
+ 	{
+ 		.led_dev =  {
+-			.max_brightness = 6,
++			.max_brightness = MT6370_LED_PWMDUTYMAX + 1,
+ 			.groups = kompakt_led_groups,
+ 			.brightness_set = mt6370_pmu_led_bright_set,
+ 			.brightness_get = mt6370_pmu_led_bright_get,

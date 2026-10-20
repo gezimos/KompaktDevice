@@ -64,9 +64,9 @@ What is measured and what is a constant:
 | `cycle_count` | real | `battery_monitor_get_cycle_count()`, the HAL's `cycle_counter` |
 | `capacity` | real | the gauge's state of charge |
 | `charge_counter` | derived | `capacity` % of `charge_full` |
-| `charge_full` | 2946000, fixed | MediaTek boilerplate `g_Q_MAX`, never learned |
-| `charge_full_design` | 3000000, fixed | `KOMPAKT_DESIGN_CAPACITY_MAH` |
-| health | about 98%, fixed | 2946 / 3000; this gauge does not learn capacity |
+| `charge_full` | 3037000, fixed | `KOMPAKT_CAPACITY_MAH` (patch 0026); MediaTek's `g_Q_MAX` 2946 is never learned |
+| `charge_full_design` | 3037000, fixed | `KOMPAKT_CAPACITY_MAH` |
+| health | 100%, fixed | this gauge does not learn capacity |
 
 Kernel patch 0020 carries two fixes to Mudita's `mtk_battery.c`. Under
 Mudita's stock kernel `charge_full_design` reads 294000 (Android shows ~1002%
@@ -74,7 +74,7 @@ health) and `cycle_count` reads 1.
 
 - **Design capacity.** Mudita's code divided `q_max` by ten for
   `CHARGE_FULL_DESIGN` only; `CHARGE_FULL` and `CHARGE_COUNTER` treat the same
-  value as mAh. It is now the constant `KOMPAKT_DESIGN_CAPACITY_MAH` (3000).
+  value as mAh. It is now the constant `KOMPAKT_CAPACITY_MAH` (3037, patch 0026).
   It cannot be a `module_param`: `MODULE` is defined for this translation unit
   though the object is built in, and `vmlinux` fails to link on
   `__this_module`. The `/ 10` in `TIME_TO_FULL_NOW` is correct and stays: it
@@ -101,7 +101,7 @@ health) and `cycle_count` reads 1.
    the compiled-in array (the bootloader log says `Get g_Q_MAX failed`). Not
    evidence.
 
-A cell characterizing at 3037 mAh to 3.0 V is a 3000 mAh-class part.
+The cell's label reads 3300 mAh at 4.45 V. This phone charges it to about 4.34 V, the top of the table, so 3037 mAh is what it holds here; patch 0026 reports that for full charge, the charge counter and the design capacity.
 
 ## 5. SELinux: orphaned vendor types
 

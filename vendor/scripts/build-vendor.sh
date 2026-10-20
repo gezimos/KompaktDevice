@@ -12,6 +12,8 @@
 #   meink-kompakt-pictures.ko   meink.ko with our pictures (apply-boot-logo.sh)
 # SYSTEM_IMG is the system image this vendor ships with; its policy is compiled
 # together with the vendor's.
+# LINEAGE must have built android.hardware.light-service.kompakt (KompaktOS
+# patch hardware_lineage_interfaces/0001): m android.hardware.light-service.kompakt
 BN=${1:?usage: build-vendor.sh <build number>}
 W=${WORK:?set WORK to the folder with the stage and inputs}
 L=${LINEAGE:?set LINEAGE to a built LineageOS tree}
@@ -24,12 +26,16 @@ export V
 AVB=$L/out/host/linux-x86/bin/avbtool
 KO=$W/meink_loader-poweroff.ko
 IMG=$W/vendor-$BN.img
+LIGHTS=$L/out/target/product/generic_arm64/vendor/bin/hw/android.hardware.light-service.kompakt
 
 # gate: loader build and vermagic
 grep -qa "kompakt-sleepimg" $KO || { echo GATE_LOADER_NOT_SLEEPIMG; exit 1; }
 grep -qa "hook wrapped after EinkInit" $KO || { echo GATE_LOADER_NO_HOLD; exit 1; }
 grep -qa "kompakt-poweroff" $KO || { echo GATE_LOADER_NO_POWEROFF_HOOK; exit 1; }
+grep -qa "acquire_screen_buffer" $KO || { echo GATE_LOADER_NO_DRAIN; exit 1; }
 grep -qa "vermagic=4.19.191-00095-g83b1ab1a9a4b-dirty" $KO || { echo GATE_VERMAGIC; exit 1; }
+# gate: the lights HAL is built
+test -f $LIGHTS || { echo GATE_LIGHTS_HAL_NOT_BUILT; exit 1; }
 # gate: meink_hal.ko unchanged
 test "$(md5sum < $V/lib/modules/meink_hal.ko)" = "$(md5sum < $W/meink_hal-217.ko)" || { echo GATE_HAL_NOT_217; exit 1; }
 # gate: meink.ko from apply-boot-logo.sh, only picture bytes changed
@@ -63,11 +69,15 @@ bash $HERE/vendor/scripts/check-vendor-policy.sh $V $SYS $L || { echo GATE_POLIC
 # fingerprint navigation: patched HAL from the stock one, plus its ini
 bash $HERE/vendor/scripts/apply-fp-navigator.sh $V $W/vendorx/lib64/hw/fpsensor_fingerprint.default.so
 bash $HERE/vendor/scripts/apply-usb-no-mass-storage.sh $V
+bash $HERE/vendor/scripts/apply-volume-curves.sh $V
+bash $HERE/vendor/scripts/apply-speech-volume.sh $V
+bash $HERE/vendor/scripts/apply-lights-hal.sh $V $LIGHTS
+bash $HERE/vendor/scripts/apply-power-hints.sh $V
 bash $HERE/vendor/scripts/stamp-build-number.sh $V $BN
 python3 - <<'PY'
 import os, sys
 V = os.environ['V']
-for p in ('lib64/hw/fpsensor_fingerprint.default.so', 'etc/fpsensor_nav.ini', 'etc/init/hw/init.mt6761.usb.rc', 'build.prop'):
+for p in ('lib64/hw/fpsensor_fingerprint.default.so', 'etc/fpsensor_nav.ini', 'etc/init/hw/init.mt6761.usb.rc', 'etc/audio_policy_volumes.xml', 'etc/audio_param/SpeechVol_AudioParam.xml', 'etc/init/hw/init.project.rc', 'build.prop'):
     label = os.getxattr(os.path.join(V, p), 'security.selinux')
     print('LABEL', p, label)
     if not label.startswith(b'u:object_r:vendor_'):
@@ -98,5 +108,9 @@ echo "IMAGE_USB_MASS_STORAGE_LINKS=$(debugfs -R "cat /etc/init/hw/init.mt6761.us
 echo "IMAGE_USB_NOTE=$(debugfs -R "cat /etc/init/hw/init.mt6761.usb.rc" $IMG 2>/dev/null | grep -c "Kompakt: no mass storage here")"
 echo "IMAGE_BUILD_NUMBER=$(debugfs -R "cat /build.prop" $IMG 2>/dev/null | grep "^ro.vendor.build.version.incremental=")"
 echo "IMAGE_BUILDPROP_LABEL=$(debugfs -R "ea_get /build.prop security.selinux" $IMG 2>/dev/null | tr -d '\0\n')"
+echo "IMAGE_SPEECH_LEVELS=$(debugfs -R "cat /etc/audio_param/SpeechVol_AudioParam.xml" $IMG 2>/dev/null | grep -c 'value="36,29,23,16,10,3,3"')"
+echo "IMAGE_LIGHTS_HAL_MATCH=$([ "$(debugfs -R "cat /bin/hw/android.hardware.lights-service.mediatek" $IMG 2>/dev/null | md5sum | cut -d' ' -f1)" = "$(md5sum < $LIGHTS | cut -d' ' -f1)" ] && echo yes || echo NO)"
+echo "IMAGE_LIGHTS_HAL_LABEL=$(debugfs -R "ea_get /bin/hw/android.hardware.lights-service.mediatek security.selinux" $IMG 2>/dev/null | tr -d '\0\n')"
+echo "IMAGE_LED_CHOWNS=$(debugfs -R "cat /etc/init/hw/init.project.rc" $IMG 2>/dev/null | grep -cE '^    chown system system /sys/class/leds/(red|green|blue)/')"
 echo "VENDOR_MD5=$(md5sum $IMG | cut -d' ' -f1)"
 echo VENDOR_DONE

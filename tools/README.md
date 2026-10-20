@@ -96,8 +96,16 @@ downgrade.
 
 ```sh
 tools/make-full-ota.sh <lineage tree> vendor/lineage-priv/keys/releasekey out.zip \
-    boot.img dtbo.img vbmeta.img system.img vendor.img product.img
+    boot.img dtbo.img vbmeta.img system.img vendor.img product.img md1img.img
 ```
+
+`md1img` is the modem firmware, which the phone keeps per A/B slot. Pass the
+region's image from the MuditaOS release the vendor comes from, unmodified:
+V236.P8 for Global, V236.P6 for USA (MuditaOS 1.6.1). MuditaOS updates write it
+with every install; a package without it runs on whatever the target slot held,
+and Global MuditaOS shipped P6 until 1.4.0, so a Global phone could get the old
+modem and lose calls. The argument is optional only so older packages can be
+rebuilt.
 
 The GSI build makes no target-files, so the script assembles one from the
 system image's `build.prop`, with the device set to `Kompakt` (the recovery

@@ -1736,10 +1736,10 @@ index 89b79b72c6c811eb3a8301e940403eda93c8b59b..bdcabc95554e9615184f0210b373ae2b
  
  module_init(meink_hal_init);
 diff --git a/drivers/misc/mudita/eink_loader/loader.c b/drivers/misc/mudita/eink_loader/loader.c
-index cbe1e0d16a2e84c62c0be1988333375bd591e1ee..0da8fa6c7c70159c1eef4a8e962b5103eae4b29f 100644
+index cbe1e0d16a2e84c62c0be1988333375bd591e1ee..1ca5c0d7df5babd65b7f7fe6c1c42d16ed5d03c3 100644
 --- a/drivers/misc/mudita/eink_loader/loader.c
 +++ b/drivers/misc/mudita/eink_loader/loader.c
-@@ -15,6 +15,14 @@
+@@ -15,6 +15,15 @@
  #include <linux/platform_device.h>
  #include <linux/spi/spi.h>
  #include <linux/err.h>
@@ -1751,10 +1751,11 @@ index cbe1e0d16a2e84c62c0be1988333375bd591e1ee..0da8fa6c7c70159c1eef4a8e962b5103
 +#include <linux/string.h>
 +#include <linux/vmalloc.h>
 +#include <linux/reboot.h>
++#include <linux/crc32.h>
  
  MODULE_DESCRIPTION("E-Ink driver loader");
  MODULE_LICENSE("GPL");
-@@ -29,6 +37,15 @@ do {    if (x) break;                                                   \
+@@ -29,6 +38,15 @@ do {    if (x) break;                                                   \
  /* Helper to get Eink API via eink_getCallback */
  #define EINK_CB eink_getCallback()
  
@@ -1770,7 +1771,7 @@ index cbe1e0d16a2e84c62c0be1988333375bd591e1ee..0da8fa6c7c70159c1eef4a8e962b5103
  /* Replace all Eink* calls with EINK_CB->* */
  #define EinkInit                EINK_CB->init
  #define EinkDeinit              EINK_CB->deinit
-@@ -120,12 +137,42 @@ static ssize_t manualMode_store(struct device *dev,
+@@ -120,12 +138,42 @@ static ssize_t manualMode_store(struct device *dev,
  }
  
  
@@ -1813,7 +1814,7 @@ index cbe1e0d16a2e84c62c0be1988333375bd591e1ee..0da8fa6c7c70159c1eef4a8e962b5103
      EinkGetWaveformMode(g_einkData.einkDrv, &type);
  	return snprintf(buf, PAGE_SIZE, "%s\n", EinkGetWaveformModeName(type));
  }
-@@ -147,6 +194,15 @@ static ssize_t waveform_type_store(struct device *dev,
+@@ -147,6 +195,15 @@ static ssize_t waveform_type_store(struct device *dev,
          typeName[sizeof(typeName) - 1] = '\0';
      }
          
@@ -1829,7 +1830,7 @@ index cbe1e0d16a2e84c62c0be1988333375bd591e1ee..0da8fa6c7c70159c1eef4a8e962b5103
      type = EinkDecodeWaveformModeName(typeName);
      if (type != kEinkWaveformInvalid)
      {
-@@ -514,6 +570,237 @@ static ssize_t temperature_offset_store(struct device *dev,
+@@ -514,6 +571,677 @@ static ssize_t temperature_offset_store(struct device *dev,
      return count;
  }
  
@@ -2063,11 +2064,451 @@ index cbe1e0d16a2e84c62c0be1988333375bd591e1ee..0da8fa6c7c70159c1eef4a8e962b5103
 +static BIN_ATTR(sleep_image, S_IWUSR|S_IWGRP | S_IRUGO, sleep_image_read, sleep_image_write, SLEEPIMG_BYTES);
 +static BIN_ATTR(sleep_image_stock, S_IRUGO, sleep_image_stock_read, NULL, SLEEPIMG_BYTES);
 +
++/* Kompakt: opt-in waveform transforms, written into meink's LUT records, which it copies into every 0x21 upload. */
++#define WF_REC            0x4141          /* N, 0x21 frames, 0x20 table, 0x22 table */
++#define WF_BANDS          14
++#define WF_NREC           (5 * WF_BANDS)  /* INIT, A2, DU2, GL16, GC16 */
++#define WF_BLOB           (WF_NREC * WF_REC)
++#define WF_FRAME          64              /* 16 x 16 transitions x 2 bits */
++#define WF_FRAMES_MAX     (0x4000 / WF_FRAME)
++#define WF_STOCK_CRC      0x81560321      /* crc32_le(0) of Mudita's meink_lut_value */
++#define WF_A2_STOCK_N     7
++#define WF_A2_SHORT_N     5
++#define WF_VT_BYTES       0xd0            /* einkEd043wc5Fn */
++#define WF_VT_SETWF       (0x58 / sizeof(void *))
++#define WF_DISP_VT        0x08
++#define WF_DISP_API_MUTEX 0x10
++#define WF_DISP_WAVEFORM  0x90
++#define WF_MEINK_OPEN     0x4c
++
++#define WF_GU16           0x1
++#define WF_A2GREY         0x2
++#define WF_A2SHORT        0x4
++
++enum { WF_INIT, WF_A2, WF_DU2, WF_GL16, WF_GC16, WF_OTHER };
++static const char * const wf_name[] = { "INIT", "A2", "DU2", "GL16", "GC16", "other" };
++
++static unsigned int wf_get(const u8 *rec, unsigned int f, unsigned int s, unsigned int t)
++{
++    unsigned int bit = s * 32 + t * 2;
++
++    return (rec[1 + f * WF_FRAME + bit / 8] >> (6 - bit % 8)) & 3;
++}
++
++static void wf_put(u8 *rec, unsigned int f, unsigned int s, unsigned int t, unsigned int code)
++{
++    unsigned int bit = s * 32 + t * 2;
++    unsigned int sh = 6 - bit % 8;
++    u8 *p = &rec[1 + f * WF_FRAME + bit / 8];
++
++    *p = (*p & ~(3u << sh)) | (code << sh);
++}
++
++/* Frames towards white minus frames towards black. */
++static int wf_net(const u8 *rec, unsigned int s, unsigned int t)
++{
++    unsigned int f, c;
++    int net = 0;
++
++    for (f = 0; f < rec[0]; f++) {
++        c = wf_get(rec, f, s, t);
++        net += (c == 2) - (c == 1);
++    }
++    return net;
++}
++
++/* Which table a record holds, from its content alone; WF_OTHER when unsure. */
++static int wf_classify(const u8 *rec)
++{
++    unsigned int n = rec[0], i, f, s, t;
++    u16 drv[16] = { 0 };
++    int uniform = 1;
++
++    if (n == 0 || n + 1 > WF_FRAMES_MAX)
++        return WF_OTHER;
++    for (i = 1; i < 1 + (n + 1) * WF_FRAME; i++)
++        if (rec[i] & (rec[i] >> 1) & 0x55)
++            return WF_OTHER;                    /* code 3 is in no stock table */
++    for (i = 1 + n * WF_FRAME; i < 1 + WF_FRAMES_MAX * WF_FRAME; i++)
++        if (rec[i])
++            return WF_OTHER;                    /* closing frame and tail are zero */
++
++    for (f = 0; f < n; f++) {
++        const u8 *fr = rec + 1 + f * WF_FRAME;
++
++        if ((fr[0] != 0x00 && fr[0] != 0x55 && fr[0] != 0xaa) ||
++            memchr_inv(fr, fr[0], WF_FRAME))
++            uniform = 0;
++        for (s = 0; s < 16; s++)
++            for (t = 0; t < 16; t++)
++                if (wf_get(rec, f, s, t))
++                    drv[s] |= 1u << t;
++    }
++
++    if (uniform)
++        return drv[0] ? WF_INIT : WF_OTHER;
++    for (s = 0, i = 0; s < 16; s++)
++        i += drv[s] == 0xffff;
++    if (i == 16)
++        return WF_GC16;
++    if (i == 15 && drv[15] == 0x7fff)
++        return WF_GL16;
++    for (s = 0; s < 16; s++)
++        if (drv[s] != (0x8001 & ~(1u << s)))
++            break;
++    if (s == 16)
++        return WF_DU2;
++    for (s = 1; s < 15; s++)
++        if (drv[s])
++            return WF_OTHER;
++    if (drv[0] != 0x8000 || drv[15] != 0x0001)
++        return WF_OTHER;
++    for (f = 0; f < n; f++)
++        if (wf_get(rec, f, 0, 15) != 2 || wf_get(rec, f, 15, 0) != 1)
++            return WF_OTHER;
++    return WF_A2;
++}
++
++/*
++ * Record idx built from the stock blob into out, with the transforms in flags
++ * that apply to it. Returns the transforms it carries; 0 means out is stock.
++ */
++static unsigned int wf_build(u8 *out, const u8 *stock, const u8 *cls,
++                             unsigned int idx, unsigned int flags)
++{
++    const u8 *src = stock + idx * WF_REC;
++    unsigned int group = idx / WF_BANDS, band = idx % WF_BANDS;
++    unsigned int gl = WF_GL16 * WF_BANDS + band;
++    unsigned int n = src[0], nn = n, done = 0, f, s, w, b;
++    int nw, nb;
++
++    memcpy(out, src, WF_REC);
++    if (cls[idx] != group)
++        return 0;                               /* content disagrees with its slot */
++
++    if (group == WF_GL16 && (flags & WF_GU16)) {
++        for (f = 0; f < n; f++)
++            for (s = 0; s < 16; s++)
++                wf_put(out, f, s, s, 0);
++        return WF_GU16;
++    }
++    if (group != WF_A2)
++        return 0;
++
++    if ((flags & WF_A2SHORT) && n == WF_A2_STOCK_N) {
++        nn = WF_A2_SHORT_N;
++        done |= WF_A2SHORT;
++    }
++    if ((flags & WF_A2GREY) && cls[gl] == WF_GL16) {
++        done |= WF_A2GREY;
++        for (s = 1; s < 15; s++)
++            if (wf_net(stock + gl * WF_REC, s, 15) < 0 ||
++                wf_net(stock + gl * WF_REC, s, 0) > 0)
++                done &= ~WF_A2GREY;             /* not the monotone family: skip */
++    }
++    if (!done)
++        return 0;
++
++    memset(out + 1, 0, (n + 1) * WF_FRAME);
++    out[0] = nn;
++    for (f = 0; f < nn; f++) {
++        wf_put(out, f, 0, 15, 2);
++        wf_put(out, f, 15, 0, 1);
++    }
++    if (done & WF_A2GREY) {
++        for (s = 1; s < 15; s++) {
++            nw = wf_net(stock + gl * WF_REC, s, 15);
++            nb = -wf_net(stock + gl * WF_REC, s, 0);
++            w = min_t(unsigned int, nn, nw);
++            b = min_t(unsigned int, nn, nb);
++            for (f = 0; f < w; f++)
++                wf_put(out, f, s, 15, 2);
++            for (f = 0; f < b; f++)
++                wf_put(out, f, s, 0, 1);
++        }
++    }
++    return done;
++}
++
++static unsigned int wf_band(int t)
++{
++    static const int top[] = { 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 38, 43, 50 };
++    unsigned int i;
++
++    for (i = 0; i < ARRAY_SIZE(top); i++)
++        if (t < top[i])
++            return i;
++    return 8;                                   /* meink wraps 50 and over to band 8 */
++}
++
++static unsigned int wf_group(int effective)
++{
++    switch (effective) {
++    case 1: return WF_INIT;
++    case 2: return WF_A2;
++    case 3: return WF_DU2;
++    case 6: return WF_GL16;
++    default: return WF_GC16;
++    }
++}
++
++static DEFINE_MUTEX(wf_mutex);
++static unsigned int wf_flags;
++static struct module *wf_owner;
++static u8 *wf_live;                             /* meink_lut_value */
++static u8 *wf_stock;                            /* its stock bytes */
++static u8 wf_class[WF_NREC];
++static u8 wf_done[WF_NREC];
++static void *wf_vt_stock;                       /* einkEd043wc5Fn */
++static void *wf_vt_copy[WF_VT_BYTES / sizeof(void *)];
++static int (*wf_vt_orig)(void *display, int type);
++static int (*wf_lock_session)(void *display);
++static int (*wf_unlock_session)(void *display);
++static int (*wf_get_waveform)(void *display);
++static int (*wf_set_waveform)(void *display, int type);
++static int *wf_temp_raw, *wf_temp_corr;
++
++/* Runs inside meink's set-waveform, under its display mutex: one line per upload. */
++static int wf_set_waveform_hook(void *display, int type)
++{
++    int ret = wf_vt_orig(display, type);
++    int t = READ_ONCE(*wf_temp_raw) + READ_ONCE(*wf_temp_corr);
++    unsigned int group = wf_group(*(int *)((u8 *)display + WF_DISP_WAVEFORM));
++    unsigned int idx = group * WF_BANDS + wf_band(t);
++    unsigned int done = READ_ONCE(wf_done[idx]);
++    const u8 *rec = wf_live + idx * WF_REC;
++
++    /* crc and length match the lutd= field of refresh_time when this record went out */
++    pr_info("kompakt-wf: upload %s band %u N=%u crc=%08x/%u%s%s%s\n", wf_name[group],
++            idx % WF_BANDS, rec[0], crc32_le(0, rec, rec[0] * WF_FRAME + 0x41),
++            rec[0] * WF_FRAME + 0x41,
++            done ? "" : " stock", done & WF_GU16 ? " gu16" : "",
++            done & WF_A2GREY ? (done & WF_A2SHORT ? " a2grey a2short" : " a2grey")
++                             : (done & WF_A2SHORT ? " a2short" : ""));
++    return ret;
++}
++
++/* Find meink's table and entry points and snapshot the stock blob; wf_mutex held. */
++static int wf_attach(void)
++{
++    struct module *mod = meink_get();
++    unsigned int i;
++
++    if (!mod)
++        return -ENODEV;
++    wf_live = (u8 *)meink_symbol(mod, "meink_lut_value", WF_BLOB);
++    wf_vt_stock = (void *)meink_symbol(mod, "einkEd043wc5Fn", WF_VT_BYTES);
++    wf_vt_orig = (void *)meink_symbol(mod, "einkEd043wc5_setWaveformType", 4);
++    wf_lock_session = (void *)meink_symbol(mod, "EinkDisplayLockSession", 4);
++    wf_unlock_session = (void *)meink_symbol(mod, "EinkDisplayUnlockSession", 4);
++    wf_get_waveform = (void *)meink_symbol(mod, "EinkDisplayGetWaveformType", 4);
++    wf_set_waveform = (void *)meink_symbol(mod, "EinkDisplaySetWaveformType", 4);
++    wf_temp_raw = (int *)meink_symbol(mod, "ed043wc5LastTemperatureMeasure", 4);
++    wf_temp_corr = (int *)meink_symbol(mod, "ed043wc5TemperatureCorrection", 4);
++    if (!wf_live || !wf_vt_stock || !wf_vt_orig || !wf_lock_session ||
++        !wf_unlock_session || !wf_get_waveform || !wf_set_waveform ||
++        !wf_temp_raw || !wf_temp_corr) {
++        pr_err("kompakt-wf: meink symbols not found, transforms off\n");
++        goto fail;
++    }
++    wf_stock = vmalloc(WF_BLOB);
++    if (!wf_stock)
++        goto fail;
++    memcpy(wf_stock, wf_live, WF_BLOB);         /* nothing has written it yet */
++    if (crc32_le(0, wf_stock, WF_BLOB) != WF_STOCK_CRC) {
++        pr_err("kompakt-wf: meink_lut_value is not Mudita's, transforms off\n");
++        goto fail;
++    }
++    for (i = 0; i < WF_NREC; i++) {
++        wf_class[i] = wf_classify(wf_stock + i * WF_REC);
++        if (wf_class[i] != i / WF_BANDS)
++            pr_warn("kompakt-wf: record %u reads as %s, left stock\n", i,
++                    wf_name[wf_class[i]]);
++    }
++    wf_owner = mod;
++    return 0;
++fail:
++    vfree(wf_stock);
++    wf_stock = NULL;
++    wf_live = NULL;
++    module_put(mod);
++    return -ENODEV;
++}
++
++/* Install or remove the upload logger; display mutex held. */
++static int wf_hook(u8 *display, int on)
++{
++    void **vt = (void **)(display + WF_DISP_VT);
++
++    if (!on) {
++        if (READ_ONCE(*vt) == wf_vt_copy)
++            WRITE_ONCE(*vt, wf_vt_stock);
++        return 0;
++    }
++    if (READ_ONCE(*vt) == wf_vt_copy)
++        return 0;
++    if (READ_ONCE(*vt) != wf_vt_stock)
++        return -EINVAL;
++    memcpy(wf_vt_copy, wf_vt_stock, WF_VT_BYTES);
++    if (wf_vt_copy[WF_VT_SETWF] != (void *)wf_vt_orig)
++        return -EINVAL;
++    wf_vt_copy[WF_VT_SETWF] = (void *)wf_set_waveform_hook;
++    WRITE_ONCE(*vt, wf_vt_copy);
++    return 0;
++}
++
++/* Rewrite every record that differs from what flags ask for; display mutex held. */
++static int wf_write(u8 *work, unsigned int flags, unsigned int *changed)
++{
++    unsigned int i, done;
++    int err;
++
++    for (i = 0; i < WF_NREC; i++) {
++        done = wf_build(work, wf_stock, wf_class, i, flags);
++        if (memcmp(work, wf_live + i * WF_REC, WF_REC)) {
++            err = sleepimg_poke(wf_live + i * WF_REC, work, WF_REC);
++            if (err)
++                return err;
++            (*changed)++;
++        }
++        WRITE_ONCE(wf_done[i], done);
++    }
++    return 0;
++}
++
++/* Bring meink's table to flags, then make it upload the current waveform again. */
++static int wf_apply(unsigned int flags)
++{
++    u8 *meink = g_einkData.einkDrv;
++    u8 *display = meink ? *(u8 **)meink : NULL;
++    struct mutex *api;
++    unsigned int changed = 0;
++    int err = 0, cur = -1;
++    u8 *work;
++
++    if (!display)
++        return -ENODEV;
++    if (!wf_live) {
++        if (!flags)
++            return 0;                           /* never touched: already stock */
++        err = wf_attach();
++        if (err)
++            return err;
++    }
++    work = vmalloc(WF_REC);
++    if (!work)
++        return -ENOMEM;
++    api = (struct mutex *)(display + WF_DISP_API_MUTEX);
++
++    wf_lock_session(display);                   /* no frame between our upload and its refresh */
++    mutex_lock(api);                            /* meink reads the table only under this */
++    if (flags)
++        err = wf_hook(display, 1);
++    if (!err) {
++        err = wf_write(work, flags, &changed);
++        if (err)
++            wf_write(work, 0, &changed);        /* back to stock on a failed write */
++    }
++    if (err || !flags)
++        wf_hook(display, 0);
++    mutex_unlock(api);
++    if (!err && (changed || flags) && *(int *)(meink + WF_MEINK_OPEN)) {
++        cur = wf_get_waveform(display);
++        if (cur == 1 || cur == 2 || cur == 3 || cur == 5 || cur == 6)
++            wf_set_waveform(display, cur);      /* meink skips a same-waveform set; this does not */
++        else
++            cur = -1;
++    }
++    wf_unlock_session(display);
++    vfree(work);
++
++    if (err)
++        pr_err("kompakt-wf: transforms not applied (err %d)\n", err);
++    else
++        pr_info("kompakt-wf: gu16=%d a2grey=%d a2short=%d, %u record(s) rewritten, %s%s\n",
++                !!(flags & WF_GU16), !!(flags & WF_A2GREY), !!(flags & WF_A2SHORT),
++                changed, cur >= 0 ? "re-uploaded " : "applies at the next waveform change",
++                cur >= 0 ? wf_name[wf_group(cur)] : "");
++    return err;
++}
++
++/* Before EinkDeinit: give meink its stock table and vtable back. */
++static void wf_exit(void)
++{
++    mutex_lock(&wf_mutex);
++    if (wf_live && wf_apply(0) == 0) {
++        vfree(wf_stock);
++        wf_stock = NULL;
++        wf_live = NULL;
++        module_put(wf_owner);
++    }
++    wf_flags = 0;
++    mutex_unlock(&wf_mutex);
++}
++
++static ssize_t wf_show(char *buf, unsigned int bit)
++{
++    return snprintf(buf, PAGE_SIZE, "%d\n", !!(READ_ONCE(wf_flags) & bit));
++}
++
++static ssize_t wf_store(const char *buf, size_t count, unsigned int bit)
++{
++    unsigned int flags;
++    int on, err;
++
++    if (kstrtoint(buf, 10, &on) || (on != 0 && on != 1))
++        return -EINVAL;
++    mutex_lock(&wf_mutex);
++    flags = on ? (wf_flags | bit) : (wf_flags & ~bit);
++    err = wf_apply(flags);                      /* rewriting a value forces a re-upload */
++    if (!err)
++        WRITE_ONCE(wf_flags, flags);
++    mutex_unlock(&wf_mutex);
++    return err ? err : count;
++}
++
++static ssize_t kompakt_wf_gu16_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++    return wf_show(buf, WF_GU16);
++}
++
++static ssize_t kompakt_wf_gu16_store(struct device *dev, struct device_attribute *attr,
++                                     const char *buf, size_t count)
++{
++    return wf_store(buf, count, WF_GU16);
++}
++
++static ssize_t kompakt_wf_a2grey_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++    return wf_show(buf, WF_A2GREY);
++}
++
++static ssize_t kompakt_wf_a2grey_store(struct device *dev, struct device_attribute *attr,
++                                       const char *buf, size_t count)
++{
++    return wf_store(buf, count, WF_A2GREY);
++}
++
++static ssize_t kompakt_wf_a2short_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++    return wf_show(buf, WF_A2SHORT);
++}
++
++static ssize_t kompakt_wf_a2short_store(struct device *dev, struct device_attribute *attr,
++                                        const char *buf, size_t count)
++{
++    return wf_store(buf, count, WF_A2SHORT);
++}
++
++static DEVICE_ATTR(kompakt_wf_gu16, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_gu16_show, kompakt_wf_gu16_store);
++static DEVICE_ATTR(kompakt_wf_a2grey, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_a2grey_show, kompakt_wf_a2grey_store);
++static DEVICE_ATTR(kompakt_wf_a2short, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_a2short_show, kompakt_wf_a2short_store);
++
 +static DEVICE_ATTR(refresh_time, S_IWUSR|S_IWGRP | S_IRUGO, refresh_time_show, refresh_time_store);
  static DEVICE_ATTR(pixelbits, S_IWUSR|S_IWGRP | S_IRUGO, pixelbits_show, pixelbits_store);
  static DEVICE_ATTR(waveform_mode, S_IWUSR|S_IWGRP | S_IRUGO, waveform_type_show, waveform_type_store);
  static DEVICE_ATTR(timings_mode, S_IWUSR|S_IWGRP | S_IRUGO, timings_mode_show, timings_mode_store);
-@@ -526,7 +813,7 @@ static DEVICE_ATTR(dither_type, S_IWUSR|S_IWGRP | S_IRUGO, dither_type_show, dit
+@@ -526,7 +1254,7 @@ static DEVICE_ATTR(dither_type, S_IWUSR|S_IWGRP | S_IRUGO, dither_type_show, dit
  static DEVICE_ATTR(dither_param, S_IWUSR|S_IWGRP | S_IRUGO, dither_parameter_show, dither_parameter_store);
  static DEVICE_ATTR(dither_colors, S_IWUSR|S_IWGRP | S_IRUGO, dither_colors_show, dither_colors_store);
  static DEVICE_ATTR(manual_mode, S_IWUSR|S_IWGRP | S_IRUGO, manualMode_show, manualMode_store);
@@ -2076,12 +2517,16 @@ index cbe1e0d16a2e84c62c0be1988333375bd591e1ee..0da8fa6c7c70159c1eef4a8e962b5103
  static DEVICE_ATTR(temperature_offset, S_IWUSR|S_IWGRP | S_IRUGO, temperature_offset_show, temperature_offset_store);
  static DEVICE_ATTR(log_level, S_IWUSR|S_IWGRP | S_IRUGO, logLevel_show, logLevel_store);
  static DEVICE_ATTR(clear, S_IWUSR|S_IWGRP | S_IRUGO, NULL, clear_store);
-@@ -551,14 +838,27 @@ static struct attribute *einkinfo_attrs[] = {
+@@ -551,14 +1279,30 @@ static struct attribute *einkinfo_attrs[] = {
      &dev_attr_power.attr,
      &dev_attr_eink_temperature.attr,
      &dev_attr_temperature_offset.attr,
+-    
 +    &dev_attr_refresh_time.attr,
-     
++    &dev_attr_kompakt_wf_gu16.attr,
++    &dev_attr_kompakt_wf_a2grey.attr,
++    &dev_attr_kompakt_wf_a2short.attr,
++
  	NULL,
  };
  
@@ -2104,7 +2549,7 @@ index cbe1e0d16a2e84c62c0be1988333375bd591e1ee..0da8fa6c7c70159c1eef4a8e962b5103
  static int eink_spi_probe(struct spi_device *spi)
  {
  	int ret = -1;
-@@ -574,6 +874,9 @@ static int eink_spi_probe(struct spi_device *spi)
+@@ -574,6 +1318,9 @@ static int eink_spi_probe(struct spi_device *spi)
      }
      g_einkData.einkDrv = einkDrv;
      dev_set_drvdata(&spi->dev, &g_einkData);
@@ -2114,13 +2559,14 @@ index cbe1e0d16a2e84c62c0be1988333375bd591e1ee..0da8fa6c7c70159c1eef4a8e962b5103
  
      g_einkData.eink_dbg_kobj = kobject_create_and_add("einkinfo", NULL);
  	if (!g_einkData.eink_dbg_kobj) {
-@@ -593,11 +896,21 @@ static int eink_spi_probe(struct spi_device *spi)
+@@ -593,11 +1340,22 @@ static int eink_spi_probe(struct spi_device *spi)
  
  static int eink_spi_remove(struct spi_device *spi)
  {
 +    /* Hand meink its own hook back before its deinit unregisters it. */
 +    unregister_reboot_notifier(&kompakt_reboot_nb);
 +    kompakt_hold_exit();
++    wf_exit();
      EinkDeinit(g_einkData.einkDrv);
 -    
 +
@@ -2137,7 +2583,7 @@ index cbe1e0d16a2e84c62c0be1988333375bd591e1ee..0da8fa6c7c70159c1eef4a8e962b5103
  	printk(KERN_INFO "eink driver: removed\n");
  	return 0;
  }
-@@ -619,8 +932,155 @@ static struct spi_driver panel_ed043wc5_driver =
+@@ -619,8 +1377,167 @@ static struct spi_driver panel_ed043wc5_driver =
  	.remove = eink_spi_remove,   
  };
  
@@ -2182,6 +2628,16 @@ index cbe1e0d16a2e84c62c0be1988333375bd591e1ee..0da8fa6c7c70159c1eef4a8e962b5103
 +/* Set once, at power-off or reboot: nothing paints after the power-off picture. */
 +static atomic_t kompakt_final = ATOMIC_INIT(0);
 +
++extern unsigned long *acquire_screen_buffer(void);
++extern void release_screen_buffer(void);
++
++/* A frame already inside meink when the flag went up still lands; mtkfb holds this lock across it. */
++static void kompakt_drain_update(void)
++{
++    acquire_screen_buffer();
++    release_screen_buffer();
++}
++
 +static int kompakt_update(void *ptr)
 +{
 +    if (atomic_read(&kompakt_powering_down) || atomic_read(&kompakt_final)) {
@@ -2208,6 +2664,7 @@ index cbe1e0d16a2e84c62c0be1988333375bd591e1ee..0da8fa6c7c70159c1eef4a8e962b5103
 +    if (kompakt_is_powerdown(event, data)) {
 +        atomic_set(&kompakt_held, 0);
 +        atomic_set(&kompakt_powering_down, 1);
++        kompakt_drain_update();
 +    }
 +    return NOTIFY_DONE;
 +}
@@ -2275,6 +2732,7 @@ index cbe1e0d16a2e84c62c0be1988333375bd591e1ee..0da8fa6c7c70159c1eef4a8e962b5103
 +    if (g_einkData.einkDrv == 0 || EINK_CB == NULL || EINK_CB->powerOff == NULL)
 +        return NOTIFY_DONE;
 +    atomic_set(&kompakt_final, 1);
++    kompakt_drain_update();
 +    EinkPowerOff(g_einkData.einkDrv, 0);
 +    g_powerOn = 0;
 +    pr_info("kompakt-poweroff: power-off picture painted, frames held from here (event %lu)\n",

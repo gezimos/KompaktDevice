@@ -115,6 +115,48 @@ The vendor build number is in `ro.vendor.build.version.incremental`
 property; a new `ro.vendor.*` property would be denied to them. The Kompakt app
 shows it under Installed images.
 
+### Power hints
+
+MuditaOS's framework sends MediaTek-only power hints (`PowerHalWrapper` in
+`mediatek-framework.jar`); LineageOS sends only Android's. `powerscntbl.xml`
+maps them in `libpowerhal.so`:
+
+- Android's launch mode reaches `LAUNCH`: CPU at its 2.0 GHz top, DRAM at its
+  top OPP and the top app clamped to 100 for as long as the launch lasts.
+  Hold and tail entries do nothing there: Android ends the mode and
+  `libPowerHal` releases the lock at once (logged on 372).
+- Every touch reaches `MTKPOWER_HINT_APP_TOUCH` (hint 25, 1000 ms) from
+  `system_server`. Stock it only notifies the frame boost.
+- `apply-power-hints.sh` gives `APP_TOUCH` the CPU floor of MuditaOS's
+  `UX_SCROLLING` (1.075 GHz) and `LAUNCH` the frame boost line, and removes an
+  `INTERACTION` scenario or launch tail left on the stage. Swiping in Settings
+  on 372: the CPU below 1.075 GHz in 22 of 200 samples instead of 92, janky
+  frames 20% instead of 26%.
+
+### The notification LED
+
+MediaTek's lights HAL lights one channel at a time and never breathes.
+`apply-lights-hal.sh` puts LineageOS's lights HAL in its place, at the same
+path, so `lights-mtk-default.rc`, the `ILights/default` VINTF fragment and the
+`mtk_hal_light_exec` label stay valid; `mtk_hal_light` is in `hal_light_server`,
+which the platform policy already lets read and write `sysfs_leds`.
+
+- The binary is `android.hardware.light-service.kompakt`, from KompaktOS patch
+  `hardware_lineage_interfaces/0001`: LineageOS's sources with libbase, libc++
+  and the light V2 NDK library linked in. This vendor's VNDK is v31, which has
+  no light V2 library and older libbase and libc++. It needs only LLNDK
+  libraries (`libbinder_ndk`, `liblog`) and bionic.
+- Build it in the LineageOS tree with
+  `m android.hardware.light-service.kompakt`; `build-vendor.sh` takes it from
+  `out/target/product/generic_arm64/vendor/bin/hw/`.
+- It needs kernel patch 0027 (brightness levels and the timed nodes
+  `blink start_idx duty_pcts pause_lo pause_hi ramp_step_ms`). The kernel
+  creates those 0664 root; `init.project.rc` chowns them, and `brightness`, to
+  system on boot.
+- Without 0027 the HAL finds no timed nodes: it falls back to the `timer`
+  trigger (our kernels since 0020) or, on Mudita's kernel, to a solid light
+  at one level. Ship this vendor with a boot image that has 0027.
+
 ## 6. Fingerprint navigation
 
 Chipone's fingerprint HAL (`lib64/hw/fpsensor_fingerprint.default.so`) has a
@@ -172,7 +214,9 @@ It installs our `meink.ko` pictures (checking that only picture bytes differ
 from stock), `meink_loader.ko`, the e-ink access, the Wi-Fi calling access
 (`apply-wifi-calling-access.sh`: `ipsec_mon` may read the privileged route
 details Android 16 guards, or the tunnel sends nothing), the fingerprint HAL and ini,
-`apply-usb-no-mass-storage.sh` (`USB_ADB_ACM ...`) and
+`apply-usb-no-mass-storage.sh` (`USB_ADB_ACM ...`), the lights HAL
+(`apply-lights-hal.sh`, `LIGHTS_HAL_OK`), the power hints
+(`apply-power-hints.sh`, `POWER_TOUCH_FLOOR=1`) and
 `stamp-build-number.sh` (`STAMPED ...`). It checks labels after each edit,
 compiles the policy together with `SYSTEM_IMG`'s the way init does
 (`check-vendor-policy.sh`) and stops if it fails, makes the image, and reads

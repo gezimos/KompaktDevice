@@ -12,8 +12,11 @@ test -f "$RC" || { echo "no init.project.rc under $V"; exit 1; }
 test -f "$CIL" || { echo "no vendor_sepolicy.cil under $V"; exit 1; }
 
 GENFS='(genfscon sysfs /einkinfo/sleep_image (u object_r sysfs_eink_misc ((s0) (s0))))'
-if ! grep -qxF "$GENFS" "$CIL"; then
-  python3 - "$CIL" "$GENFS" <<'EOF'
+# A prefix: one line labels every kompakt_wf_* waveform switch.
+GENFS_WF='(genfscon sysfs /einkinfo/kompakt_wf_ (u object_r sysfs_eink_misc ((s0) (s0))))'
+for G in "$GENFS" "$GENFS_WF"; do
+if ! grep -qxF "$G" "$CIL"; then
+  python3 - "$CIL" "$G" <<'EOF'
 import sys
 cil, line = sys.argv[1], sys.argv[2]
 s = open(cil).read()
@@ -25,9 +28,11 @@ with open(cil, 'r+') as f:
     f.truncate()
 EOF
 fi
+done
 
 NODES="dither_type dither_param dither_colors eink_temperature temperature_offset
-       refresh_time refresh_mode manual_mode sleep_image"
+       refresh_time refresh_mode manual_mode sleep_image
+       kompakt_wf_gu16 kompakt_wf_a2grey kompakt_wf_a2short kompakt_wf_a2frames kompakt_wf_gl16trim kompakt_wf_dither kompakt_wf_dither_cut kompakt_wf_dither_step kompakt_wf_du4"
 PARAMS="trace measure deghost_every partial partial_max_pct partial_full_every
         semi_partial semi_window auto_busy_pct auto_busy_frames auto_idle_ms"
 
@@ -80,5 +85,8 @@ echo "nodes=$N/$(echo $NODES | wc -w) params=$P/$(echo $PARAMS | wc -w)"
 test "$N" = "$(echo $NODES | wc -w)" && test "$P" = "$(echo $PARAMS | wc -w)"
 G=$(grep -cxF "$GENFS" "$CIL")
 echo "sleep_image genfscon=$G"
+test "$G" = "1"
+G=$(grep -cxF "$GENFS_WF" "$CIL")
+echo "kompakt_wf_ genfscon=$G"
 test "$G" = "1"
 echo EINK_ACCESS_OK
