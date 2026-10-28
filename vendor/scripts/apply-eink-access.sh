@@ -32,7 +32,7 @@ done
 
 NODES="dither_type dither_param dither_colors eink_temperature temperature_offset
        refresh_time refresh_mode manual_mode sleep_image
-       kompakt_wf_gu16 kompakt_wf_a2grey kompakt_wf_a2short kompakt_wf_a2frames kompakt_wf_gl16trim kompakt_wf_dither kompakt_wf_dither_cut kompakt_wf_dither_step kompakt_wf_du4"
+       kompakt_wf_gu16 kompakt_wf_a2grey kompakt_wf_a2short kompakt_wf_a2frames kompakt_wf_gl16trim kompakt_wf_dither kompakt_wf_dither_cut kompakt_wf_dither_step kompakt_wf_du4 kompakt_wf_dither_edge kompakt_wf_dither_light"
 PARAMS="trace measure deghost_every partial partial_max_pct partial_full_every
         semi_partial semi_window auto_busy_pct auto_busy_frames auto_idle_ms"
 

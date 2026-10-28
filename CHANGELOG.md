@@ -4,6 +4,50 @@ The boot image (kernel and LineageOS recovery) and the vendor images. Each
 KompaktOS release ships these inside its full update package; the recovery
 image is also released here on its own.
 
+## 1.3 (unreleased)
+
+Boot 277, vendor 319.
+
+### Flashlight
+
+- **The warm light stays on when the white one goes off.** With both on,
+  switching the white flashlight off turned the warm one off too, while its
+  tile still showed it on. `kernel/patches/0037`.
+
+### E-ink
+
+meink draws, as in 1.2; these add to the tables and dithers it uses
+(`kernel/patches/0035`).
+
+- **No ghost of the previous screen after a slide-in.** A partial refresh
+  could leave one changed area out (two separated areas, the first in two
+  parts, such as the app drawer sliding over the home screen); that area kept
+  the old picture until something redrew it. Every changed area now gets
+  refreshed, or the whole screen is. The HAL.
+- **Fast speed 8 and 9** (Caster's default length): deeper blacks and fewer
+  traces, a little slower. `kompakt_wf_a2frames`.
+- **Blue noise dithering** (`kompakt_wf_dither 4`): dots that stay put like
+  Pattern, without its grid.
+- **Text stays sharp with the Pattern, Hybrid and Noise dithers.** A pixel at a
+  sharp edge (text, lines, icons) is cut to black or white instead of dotted;
+  photos and gradients are still dithered. `kompakt_wf_dither_edge` sets how
+  sharp, 0 turns it off.
+- **Text in the Pattern, Hybrid and Noise dithers is as bold as in Normal.**
+  They follow the mode's tone curve, as meink's own dither does, and cut text
+  edges at the same grey; before, they saw lighter greys and drew thinner
+  strokes.
+- **Dither brightness** (`kompakt_wf_dither_light`, 0 to 3): lifts the dark
+  greys of Pattern, Hybrid and Noise so photos keep their shadows; text keeps
+  its weight.
+- **Waking keeps your e-ink mode.** meink switched to Fast on every wake, so
+  a Quality or Text phone drew the lock screen in Fast. The loader sets your
+  mode again right after.
+- **Locking goes straight to the always-on display.** No panel power-down
+  and no sleep picture before it: the panel clears once and draws the
+  always-on display, whose clock and notification updates then draw in Fast,
+  whatever mode is chosen. The sleep picture still shows when the always-on
+  display is off. `kernel/patches/0036`.
+
 ## 1.2 (2026-10-20)
 
 Boot 275 (released on its own as recovery 1.1), vendor 297 for Global and USA.

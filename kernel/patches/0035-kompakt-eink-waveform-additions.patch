@@ -1,0 +1,570 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gezim <gezimos@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 14:00:00 +0300
+Subject: [PATCH] kompakt: e-ink waveform and dither additions on meink
+
+meink draws, as in 1.2; this adds to the tables and dithers it uses.
+
+kompakt_wf_a2frames takes 8 and 9 (Caster's default A2 length): deeper
+blacks and fewer traces. These only lengthen, never shortening a cold band
+below its own run; 2 to 6 shorten as before.
+
+kompakt_wf_dither 4 is blue noise: a 64x64 void-and-cluster matrix, ordered
+like the Bayer patterns, so dots stay put when the picture moves, without
+the grid.
+
+The loader's dithers run on the mode's tone curve, read from meink's
+EinkImage (+0x88, its 8-bit transfer at +0x300), as meink's own dither
+does; without it our patterns saw lighter greys than Normal and drew text
+thinner. A pixel at a sharp edge (kompakt_wf_dither_edge, 0 off) is cut to
+black or white at meink's threshold of 160 instead of patterned.
+kompakt_wf_dither_light (0 to 3) lifts the grey of dithered pixels towards
+light so photos keep their shadows; edges keep the mode's curve.
+
+Partial refresh: a band of changed columns is split into row runs only if
+every band after it still gets one of the two boxes. A band without a box
+was never refreshed but kept its old picture on the panel until something
+redrew it (the app drawer showed the home screen through it). Anything left
+over now goes out as a full update.
+
+meink switches to A2 on every unblank, which left the lock screen and
+everything after it on A2 whatever mode was chosen. The loader keeps the
+waveform last written to waveform_mode and sets it again from an fb
+notifier that runs after meink's. meink also sets A2 on every DOZE entry
+and the AOD stays on it. Entering AOD over an awake screen or the sleep
+picture, the loader first sets GL16 with meink's skip-clear flag down, so
+meink's own GL16 to A2 switch clears black, white and redraws the newest
+frame before the AOD; minute ticks re-enter DOZE over the AOD and are left
+alone.
+
+---
+diff --git a/drivers/misc/mudita/eink_loader/eink_spi_hal.c b/drivers/misc/mudita/eink_loader/eink_spi_hal.c
+--- a/drivers/misc/mudita/eink_loader/eink_spi_hal.c
++++ b/drivers/misc/mudita/eink_loader/eink_spi_hal.c
+@@ -760,7 +760,8 @@
+             if (row_any[j] && (j == lo || !row_any[j - 1]))
+                 runs++;
+ 
+-        if (runs == 0 || obn + runs > MAX_BOXES) {
++        /* Kompakt: split only if every band after this one still gets a box; a dropped band was never refreshed. */
++        if (runs == 0 || obn + runs + (nboxes - i - 1) > MAX_BOXES) {
+             /* no budget to split it: one span, exactly as before */
+             obx[obn].c0 = c0;
+             obx[obn].c1 = c1;
+@@ -786,6 +787,13 @@
+         }
+     }
+ 
++    /* A band left without a box would keep the old picture; refresh the whole band set instead. */
++    if (i < nboxes) {
++        eink_semi_stage(rb, depth);
++        memcpy(last_frame, px, pxlen);
++        pr_info("einkpart: %u band(s), no box budget left; full update\n", nboxes);
++        return 0;
++    }
+     for (i = 0; i < obn; i++)
+         boxes[i] = obx[i];
+     nboxes = obn;
+diff --git a/drivers/misc/mudita/eink_loader/loader.c b/drivers/misc/mudita/eink_loader/loader.c
+--- a/drivers/misc/mudita/eink_loader/loader.c
++++ b/drivers/misc/mudita/eink_loader/loader.c
+@@ -46,18 +46,28 @@
+ /* Kompakt: meink's render object ([1] of the Meink handle) and its one-shot "skip the switch clear" flag. */
+ #define KOMPAKT_MEINK_RENDER     0x8
+ #define KOMPAKT_RENDER_SKIP_CLEAR 0x244
++/* Kompakt: meink display +0x88 is its EinkImage; +0x300 there is the 8-bit grey transfer. */
++#define KOMPAKT_DISP_IMAGE       0x88
++#define KOMPAKT_IMAGE_LUT8       0x300
+ 
+ /* Kompakt: ordered (Bayer) dithering in the loader instead of meink's Floyd-Steinberg. */
+ #define KOMPAKT_FB_W     480
+ #define KOMPAKT_FB_H     800
+ #define KOMPAKT_FB_BYTES (KOMPAKT_FB_W * KOMPAKT_FB_H * 4)
+-static int kompakt_dither;              /* kompakt_wf_dither: 0 meink FS, 1 Bayer 8x8, 2 Bayer 4x4, 3 Atkinson over Bayer */
++static int kompakt_dither;              /* kompakt_wf_dither: 0 meink FS, 1 Bayer 8x8, 2 Bayer 4x4, 3 Atkinson over Bayer, 4 blue noise */
+ static int kompakt_dither_req;          /* the dither type last asked for, by the app or Auto */
+ static bool kompakt_bayer_on;
+ static u8 *kompakt_bayer_buf;
+ static unsigned int kompakt_cut_lo = 48;    /* kompakt_wf_dither_cut: at or below goes black */
+ static unsigned int kompakt_cut_hi = 208;   /* at or above goes white; only greys in between are patterned */
+-static u16 kompakt_thr8[64], kompakt_thr4[16];
++static u8 kompakt_thr8[64], kompakt_thr4[16], kompakt_thrb[64 * 64];
++/* Kompakt: meink's Floyd-Steinberg turns white above this; text edges are cut at the same grey. */
++#define KOMPAKT_EDGE_CUT 160
++/* Kompakt: kompakt_wf_dither_edge: a grey this far from a neighbour is an edge (text, lines) and is cut, not patterned; 0 is off. */
++static int kompakt_edge = 64;
++/* Kompakt: kompakt_wf_dither_light: our dithers' curve lifted towards light, 0 (the mode's) to 3, so shadows keep detail. */
++static int kompakt_light;
++static u8 *kompakt_grey;                /* the frame in greys, for the edge test */
+ static int kompakt_step = 8;            /* kompakt_wf_dither_step: Bayer spread of the hybrid, 32 is full Bayer */
+ static s16 kompakt_hthr[64];
+ static s16 *kompakt_err;                /* three rows of diffused error, two pixels of padding each side */
+@@ -74,6 +84,73 @@
+     15, 47,  7, 39, 13, 45,  5, 37,
+     63, 31, 55, 23, 61, 29, 53, 21,
+ };
++/* Kompakt: 64x64 blue noise by void and cluster, ranks scaled to 0..255: still like Bayer, without its grid. */
++static const u8 kompakt_blue64[64 * 64] = {
++     97,  30,  81, 249,  25, 193, 166, 102, 183, 215, 159, 116, 201,  50, 193,  18,  79, 136, 196,  67, 118, 158,  37,  88,   0, 250,  31,  55, 135, 247, 119, 153,  57, 138,  36, 170,   0, 104,  31, 190,  90, 148, 115, 219,  54, 124, 161, 205,   3, 123, 236,  44, 217,   6, 148,  97, 127,  68, 158, 183, 128, 213,  44, 245,
++    120, 228, 138, 161, 109,   7, 140,  60,  27, 131, 240,  35,  97, 139, 225, 153, 208,  50,  15, 238, 209, 103, 185, 229, 200,  96, 161, 110, 213,  70,   3, 203, 225,  94, 252,  54, 149, 241,  62, 120, 255,  36, 178,   5, 192, 230,  21, 110, 223, 155,  27, 135, 163,  60, 199,  30, 240, 208, 104,  55, 251,   2, 141, 196,
++     69,  11, 202,  53, 225,  77, 212, 242, 153,  88,  56, 171, 233,   6,  68, 101, 241, 172,  88, 146,  28,  52, 141,  22,  64, 132, 232,  11, 169,  42, 181,  83,  18, 175, 115, 211,  81, 180, 216,   9, 165,  73, 207,  98, 140,  82,  59, 182,  72,  96, 186, 208,  83, 117, 227,  76, 169,  14, 148,  28, 200,  88, 170,  26,
++    132, 177, 103,  36, 181, 128,  95,  42, 194,   2, 206, 128,  76, 181,  41, 130,  30, 112, 218, 184,  72, 253, 211, 116, 175,  36,  77, 197,  91, 148, 237, 133, 196,  67, 156,  12, 129,  39, 144, 100, 234, 133,  56, 247,  41, 172, 238, 146,  36, 243,  57,  12, 255,  37, 178, 134,  49,  90, 231, 120, 155,  63, 106, 241,
++    217,  85, 238, 142,  66, 253,  17, 173, 113, 231,  99,  20, 216, 148, 255, 199, 164,  62,   2, 125,  95, 164,   8,  82, 244, 215, 140,  49, 255, 118,  25, 105,  45, 217,  31, 234,  96, 201,  70,  21, 191,  27, 161, 115,  20, 209, 121,   7, 214, 127, 170, 108, 147, 196,   0, 105, 247, 192,  66, 210,  42, 226, 189,  38,
++     55, 163,   3, 193,  27, 156, 204,  57, 139,  69, 164, 189,  51, 111,  90,  11,  80, 244, 151, 230,  41, 193, 132,  56, 153,  25, 111, 177,  15, 205,  63, 225, 166,  91, 141, 186,  55, 245, 156, 221, 123,  79, 227, 194, 148,  90,  50, 101, 194,  81,  24, 235,  62,  92, 224, 160,  20, 143, 109,   5, 165, 128,  12, 149,
++    207,  73, 124, 214, 104,  78, 120, 222,  12, 250,  34, 118, 234,  24, 169, 225, 137, 189,  52, 205,  18, 107, 239, 204,  93, 190,  66, 228, 153,  82, 180, 137,   5, 250,  73, 118, 171,   5, 109,  35, 173,  48,  99,   1,  69, 219, 167, 252, 151,  44, 187, 131, 164,  43, 126,  71, 216,  46, 175, 238,  95,  76, 254, 100,
++    115,  26, 246,  50, 170, 234,  36, 179,  94, 155, 209,  82, 145,  64, 203,  45, 118,  25, 105,  85, 141, 179,  47,  21, 126, 235,   2, 100, 128,  30, 240,  52, 115, 200,  19, 224,  44, 135, 194,  91, 233, 202, 129, 243, 178,  35, 133,  17,  64, 232,  98, 218,  21, 205, 242,  30, 184,  82, 126,  32, 213, 184,  21, 174,
++    232, 141, 181,  87, 136,   6, 149,  71, 197,  48, 130,   4, 178, 248, 101, 154,  72, 211, 172, 251,  68, 220, 156,  78, 177,  40, 163, 208,  47, 195, 158,  96, 183,  39, 156,  99, 205,  80, 253,  59, 145,  19, 163,  45, 111, 230,  80, 204, 121, 173,   3,  71, 113, 176,  88, 147, 115, 252, 202,  68, 151,  54, 133,  40,
++    197,  57,  11, 227,  43, 189, 248, 111,  24, 239, 104, 218,  42, 125,  16, 183, 239,   4, 146,  33, 127,   7, 101, 208, 253, 112, 139,  71, 246,  88,   9, 215,  70, 136, 244,  64, 168,  28, 154,   9, 117,  73, 213,  86, 150,  11, 190,  96,  29, 211, 140, 250, 153,  55,  15, 200,  58,   7, 160,  22, 107, 245, 218,  74,
++     96, 166, 109, 203, 123,  94,  51, 210, 140, 167,  63, 191, 157,  73, 225,  38,  92, 121, 222,  51, 196, 231,  61, 144,  17,  57, 218,  13, 175, 122, 145, 233,  21, 207, 121,   1, 227, 113, 212, 176, 239, 189,  30, 251, 180,  53, 138, 246, 161,  57,  88,  40, 187, 223, 106, 236, 172,  98, 228, 135, 193,  89,   1, 154,
++     29, 251,  77, 149,  19, 219, 174,  77,   9, 232,  89,  23, 244,  98, 197, 138, 168,  62, 184,  83, 158, 114, 182,  39, 170,  90, 190, 107, 227,  38,  60, 106, 170,  86,  49, 184, 141,  37,  86,  49,  98, 135,  62, 125, 104, 219,  73,  41, 113, 232, 198, 130,  10,  79, 142,  42, 130,  75,  35, 212,  48, 169, 125, 207,
++    117, 177,  40, 238,  65, 158,  32, 128, 188, 113,  41, 143, 116,  10,  55, 216,  20, 243, 109,  10, 248,  24,  75, 236, 119, 225, 152,  25,  79, 159, 254, 197,  33, 149, 238, 101,  72, 249, 193, 150,  16, 230, 164,   4, 198,  25, 171, 225,   5, 146,  25, 103, 240, 165, 210,  18, 195, 245, 177, 113,  81,  19, 233,  53,
++    222,  15, 131, 187, 103, 229,  86, 251,  54, 216, 162, 205, 228, 177, 124,  87, 160,  43, 199, 147,  97, 210, 134, 194,   0,  66,  44, 210, 127, 186,  14,  75, 129, 212,  18, 198, 162,  12, 126, 220,  76, 202,  45, 237,  86, 153, 121,  94, 189,  78, 174, 217,  67,  48, 119,  89, 157,  57,   5, 148, 240, 182, 139,  71,
++    156,  86, 214,  56,  10, 137, 196,  17, 149,  97,   0,  61,  79,  33, 254, 188,  66, 134, 221,  69,  36, 165,  52,  92, 159, 249, 137,  94, 240,  55, 114, 222, 173,  62, 117,  40, 226,  59, 105,  31, 178, 118,  94, 144,  66, 247,  39, 208,  61, 251, 119,  29, 148, 186, 254,  34, 226, 125,  97, 219,  61,  34, 100, 197,
++     45, 244, 109, 167, 205,  43, 114, 177,  75, 236, 185, 135, 170, 102, 145,   6, 234, 116,  18, 181, 230, 107, 242,  23, 209, 108, 184,  10, 166,  32, 147,  91,   3, 249, 154,  82, 134, 182, 243, 157,  64, 227,  21, 187, 214,  12, 179, 138,  16, 155,  45,  93, 204,   1, 104, 171,  71, 201,  31, 186, 128, 162, 254,   4,
++    190, 142,  26,  73, 148, 242,  66, 220,  28, 123,  43, 245,  17, 220,  51, 203,  97,  39, 156,  81, 126,   9, 188, 141,  77,  35,  59, 205,  84, 219, 193, 234,  51, 100, 189, 218,   8,  92,  43, 200,   2, 136, 169,  41, 128, 108,  56, 235, 104, 219, 183, 237, 130,  76, 220, 136,  12, 153, 248,  83,  17, 209,  79, 119,
++     64,  96, 181, 233, 120,   3,  94, 163, 142, 203, 106,  85, 199, 118, 163,  76, 137, 186, 251, 211,  46, 168,  64, 217, 122, 174, 230, 112, 140,  65, 123,  26, 176, 141,  30,  65, 165, 231, 144, 112,  82, 245, 101, 230,  79, 200, 166,  82,  32, 125,  64,  19, 164,  38, 180,  58, 229, 108,  47, 168, 112,  50, 149, 228,
++     35, 222,  14,  52, 212, 192,  37, 254,  56,  20, 224, 150,  66,  37, 247,  23, 223,  58,   2, 101, 143, 237,  90,  40, 254,   4, 151,  31, 247,  12, 163,  81, 206, 118, 239, 201, 124,  24,  68, 213, 188,  33,  60, 156,  24, 254,   2, 146, 198, 170,  87, 211, 109, 247,  92,  24, 192,  75, 141, 217, 191, 235,  11, 172,
++    206, 127, 162, 107,  80, 171, 132, 103, 185,  78, 166,   6, 190, 130, 180,  90, 151, 114, 170,  72, 204,  17, 114, 160, 193,  95,  73, 199,  51, 184, 102, 243,  58,  14,  89,  47, 101, 180, 249,  16, 151, 120, 220, 194, 140,  67, 119, 226,  52, 245,   8, 150,  51, 134, 208, 158, 123, 243,   3,  33,  93,  69, 138, 105,
++     84,  60, 249, 143,  25, 238,  63,  13, 211, 121, 245,  48, 231, 104,  13, 206,  45, 241, 195,  34, 123, 180, 215,  26,  60, 136, 228, 168, 119, 222, 145,  38, 218, 155, 186, 138, 226,  35, 133,  95,  54, 175,   6,  91,  46, 216, 175,  95,  27, 135, 100, 231, 196,  20,  67, 233,  42,  95, 183, 160, 122, 248,  27, 185,
++    236,   3, 194,  42, 208, 114, 159, 225, 139,  31,  97, 144,  81, 215, 160,  70, 133,  17,  93, 156, 248,  52,  80, 144, 241, 107,  39,  18,  91,  63,   6, 190, 125,  73, 255,   0, 164,  80, 207, 159, 232,  77, 247, 130, 164, 109,  15, 192,  74, 214, 184,  33,  80, 173, 114,   9, 150, 210,  65, 226,  51, 200, 152,  46,
++    134, 167, 102,  72, 177,   8,  83,  47, 176,  69, 206, 170,  27,  56, 122, 237, 178, 219,  56, 210,   9, 103, 224, 175,  11, 196, 213, 154, 251, 134, 204,  87, 171,  28, 109,  64, 214, 115,  50,  10, 200, 106,  23, 206,  34, 230,  57, 249, 146, 113,  59, 164, 126, 254, 203,  83, 177, 109,  18, 136,  83,   7, 108, 213,
++     92,  24, 223, 122, 246, 146, 232, 198, 107, 240,   2, 117, 251, 191,   9,  96,  36, 113, 148,  77, 132, 165,  36, 121,  86,  53, 127,  74, 180,  33, 237, 112,  50, 232, 199, 147,  21, 235, 176, 124,  38, 187, 147,  70, 177,  88, 124, 160,  41,   4, 241,  91,  13,  52, 143,  32, 220,  49, 251, 192, 165, 232, 179,  64,
++    255, 149, 189,  53,  27,  95,  37, 129,  20, 151,  58, 182,  92, 148, 226, 167,  67, 246, 191,  29, 236, 202,  67, 252, 187, 161, 233,   1, 106,  58, 159,  21, 216, 130,  84,  42, 191,  95,  72, 252, 139,  61, 222, 113, 242,   7, 195,  77, 223, 173, 199, 134, 224, 188,  99, 238, 132,  74, 118,  28, 100,  42, 129,  14,
++    201,  36,  77, 136, 216, 193, 171,  73, 212,  88, 225, 135,  42,  75,  31, 201, 140,   0,  88, 173,  49, 112,   5, 147,  25,  98,  41, 193, 143, 222, 185,  78, 151,  13, 169, 247, 121, 156,  28, 214,  87, 165,  19,  48, 156, 134, 217,  22,  98, 119,  46,  72, 159,  25,  64, 166,   0, 187, 213, 148, 242,  78, 217, 162,
++     89, 117, 242, 163,   0, 112,  57, 253, 159,  33, 196,  12, 236, 211, 127,  99,  54, 223, 121, 214, 154,  92, 192, 228,  78, 209, 117, 246,  88,  13, 114, 250,  55, 197, 105,  67,   7, 208,  55, 172,   2, 102, 233, 200,  93,  66,  39, 182, 236, 153,  28, 212, 107, 234, 121, 203,  90, 156,  39,  67,  11, 185, 112,  52,
++    142,  17, 185,  63,  85, 235, 143,  16, 103, 121, 168,  66, 115, 173,  15, 253, 158, 180,  24,  71,  15, 244, 125,  55, 139, 174,  19, 154,  65, 208,  38, 137,  90, 213,  34, 183, 144, 237, 107, 133, 244, 191, 123,  31, 172, 255, 112, 139,  55,  83, 245, 179,  10, 145,  44, 250,  19, 107, 236, 135, 205, 156,  27, 239,
++    171, 211,  43, 226, 131, 199,  41, 183, 228,  50, 247,  94, 152,  49, 192,  81,  34, 106, 239, 137, 167,  42, 178,  29, 219,  69, 230,  45, 171, 128, 234, 176,   8, 156, 242, 129,  86,  44, 179,  80,  35,  65, 147,  79, 215,  16, 162, 207,   2, 194, 130,  64,  96, 195,  79, 174,  59, 216, 177,  84,  49, 100, 219,  68,
++    122,  91, 155, 107,  11, 169,  96,  70, 203,   3, 136, 206,  19, 239, 110, 145, 207,  62, 187,  91, 221, 111,  80, 199, 102,   8, 135, 108, 199,  24,  98,  70, 223, 115,  60,  22, 221, 199,  18, 227, 161, 210,  10, 183, 120,  48,  74,  94, 224, 110,  22, 170, 231,  35, 221, 129, 150,  32, 119,   8, 253, 131, 181,   4,
++     47, 251,  23, 204,  59, 246,  28, 126, 150,  84, 174,  35,  79, 219,  59,   6, 232, 119,  26,  49, 202,   4, 255, 130, 163, 240, 187,  76, 248,  57, 162, 190,  43, 144, 194, 100, 165,  69, 151, 115,  92,  46, 247,  98, 225, 144, 241, 172,  37, 149, 252,  47, 154, 118,   4,  93, 202,  75, 229, 190, 151,  33,  81, 232,
++    143, 178,  77, 134, 159, 111, 210, 181, 225,  58, 242, 123, 184, 157, 130, 178,  87, 161, 248, 149, 124,  63, 157,  25,  52,  89,  34, 149,  10, 218, 124,  17, 254,  82,   2, 237, 125,  38, 252,   5, 189, 129, 167,  61,  31, 197,   9, 125,  62, 187,  78, 103, 209,  70, 181, 248,  21, 162,  41,  97,  65, 212, 112, 197,
++     20, 104, 215,  37, 236,  82,  49,   9,  99,  26, 109, 214,  47,  97,  27, 223,  44, 201,  11,  78, 225, 186,  96, 230, 204, 122, 224, 174, 106, 142,  85, 207, 107, 172, 211,  52, 184,  85, 140, 213,  66, 235,  20, 111, 180,  70, 105, 210, 235,  13, 131, 196,  19, 238, 135,  44, 111, 219, 137, 242, 173,  13, 161,  59,
++    126, 230,  64, 192,  13, 174, 144, 255, 163, 197, 141,  11,  73, 252, 195, 115,  69, 134,  99, 177,  41,  15, 140,  73, 167,   2,  66, 201,  50, 243,  33, 154,  57,  29, 116, 149,  14, 206, 105,  31, 175,  83, 150, 222, 138, 252, 159,  43,  92, 165, 227,  34, 147,  94,  59, 168, 192,  86,   3,  54, 121, 223,  89, 247,
++    169,   1, 152,  97, 127, 223,  63, 117,  38,  78, 238, 167, 207, 147,   3, 169, 241,  30, 228, 153, 110, 246, 195,  44, 103, 250, 135,  95,  14, 189,  72, 179, 240, 138, 225,  67, 245, 165,  56, 229, 119,  43, 201,   0,  50,  85,  23, 194, 142,  68, 117,  53, 177, 223,   9, 233,  67, 146, 208, 100, 193,  30, 145,  42,
++    205,  82, 184,  46, 205,  30,  91, 191, 217, 126,  54,  93,  34, 110,  56,  90, 142, 189,  51, 206,  65, 131,  22, 219, 151, 188,  38, 233, 163, 111, 229, 125,  10,  81, 190,  99,  39, 122, 195,   8, 161, 249,  99, 183, 124, 210, 108, 239,   4, 179, 250,  86, 205, 111, 159, 124,  24, 255,  37, 158, 238,  74, 182, 110,
++    241,  32, 136, 248, 112, 164, 237,   3, 155,  24, 186, 229, 132, 192, 237, 209,  18, 119,  84,   1, 235,  91, 173, 118,  57,  18,  86, 146, 209,  56,  25,  92, 206,  47, 169,  20, 212,  76, 145,  93,  63, 131,  26,  75, 237, 164,  64, 132,  49, 201,  28, 139,  15,  72,  40, 214,  80, 177, 116,  61, 131,   8, 218,  58,
++    158,  94, 224,  68,  19,  78, 141,  49,  99, 250,  69,  12, 154,  76,  24, 159,  62, 250, 163, 181, 138,  32, 226,  75, 203, 240, 121,  65,  27, 131, 173, 222, 143, 107, 251, 131, 158, 233,  28, 241, 205, 169, 221, 149,  40,  11, 187, 225,  84, 157, 105, 221, 172, 246, 187, 142, 103, 202,  16, 227, 188,  95, 141,  20,
++    194, 125,   7, 176, 196, 218, 116, 182, 209, 131, 168, 118, 220,  47, 178, 128, 101, 214,  40, 108, 202,  53, 154,   6, 104, 179, 161, 224, 186, 253,  79,   0, 192,  34,  65, 203,  11, 104, 181,  45, 110,  20,  57, 116, 206, 102, 151,  21, 120, 243,  70,  45, 127,  94,  60,   1, 240,  47, 165,  86,  32, 251, 167,  76,
++     37, 210, 151,  52, 103,  37, 242,  65,  27,  85,  39, 195, 101, 249,  90, 232,   7, 146,  75,  18, 242,  93, 191, 252, 138,  46,  12,  97,  41, 109, 159,  60, 232, 165, 120,  89,  49, 224,  71, 138, 194,  85, 247, 185,  78, 240,  60, 215,  38, 182,   7, 160, 208,  29, 227, 167, 129,  74, 147, 206, 123,  52, 108, 231,
++     66, 116,  87, 252, 161, 134,   6, 171, 149, 234, 215,  61,   1, 144,  35, 199,  54, 190, 228, 121, 161,  68, 123,  30,  84, 231,  70, 207, 152,  18, 218, 129,  95,  23, 239, 188, 150, 124, 170,  16, 230, 154,   7, 137,  30, 125, 168,  96, 141, 204, 114, 236,  83, 150, 112, 200,  21, 100, 233,   6, 179, 213,  14, 182,
++    242,  26, 220,  13,  70, 209,  88, 200, 102,  15, 138, 113, 174, 210,  73, 162, 114,  88, 174,  46, 212,   9, 171, 217, 150, 196, 117, 136, 245,  83, 198,  45, 186, 140,  76,   5, 208,  32, 254, 114,  56,  99, 216, 175,  50, 200,   4, 254,  54,  87, 168,  62,  14, 191,  40,  71, 252, 181,  41, 114,  70, 152,  84, 135,
++     48, 127, 189, 172, 110, 232,  45, 125, 249,  53, 188,  82, 243,  20, 126, 224,  15, 255,  29, 133,  98, 235,  40, 105,  55,   2, 176,  26,  51, 164, 115,  14, 248,  58, 216, 168,  97,  60,  84, 180, 202,  34,  72, 108, 232,  84, 154, 185,  22, 229,  34, 137, 246,  98, 218, 136, 156,  59, 217, 143, 244,  39, 222, 164,
++    198,  93, 145,  60,  23, 140, 183,  29,  72, 155, 221,  37, 158, 104,  52, 179, 144,  71, 207, 157,  62, 192, 136, 181, 248,  82, 233, 101, 219,  69, 235, 176, 102, 158,  29, 113, 240, 139, 220,   1, 132, 164, 249, 146,  20, 211, 113,  70, 132, 103, 215, 187, 118,  53, 176,   5, 110,  27, 195,  93,  22, 176, 102,   0,
++     76, 227,  37, 202, 239,  83, 162, 226, 195, 118,   5, 130,  64, 196, 234,  94,  43, 185, 106,  12, 245,  86,  16,  71, 160, 125,  39, 155, 189,   5, 142,  37,  80, 226, 131,  46, 195,  23, 160,  52, 236, 120,  11, 193,  61, 137,  40, 235, 202, 152,   1,  74, 161,  23, 239,  85, 227, 167,  75, 131, 204,  63, 122, 253,
++    157,  21, 105, 165, 123,   8,  56, 108,  19,  91, 245, 180, 217,  29, 137,   4, 241, 126, 221,  50, 169, 117, 209, 227,  26, 197, 214,  61, 117,  89, 211, 122, 188,  12, 204,  89, 171,  74, 108, 210,  92,  69,  42, 168,  90, 243, 180,  14,  56,  85, 250,  45, 207, 129,  62, 193, 126,  43, 246,   7, 229, 145, 186,  53,
++    116, 182, 246,  68, 211,  98, 255, 146, 209, 169,  43,  77, 110, 167,  84, 211, 159,  28,  78, 147, 201,  36, 139,  51, 108,  85,  10, 144, 237,  25, 157,  50, 255,  71, 147, 243,   9, 229, 142,  27, 176, 198, 228, 111, 217,  25, 105, 159, 127, 173, 111, 183,  92, 223, 155,  14,  97, 182, 152, 109,  46,  88,  13, 213,
++    137,  85,   5, 152,  42, 174, 192,  34,  63, 135, 230, 150,  10, 253,  48, 118,  67, 190, 101, 235,   0,  95, 253, 153, 183, 130, 247, 174,  44, 194, 224, 104, 170,  32, 109,  53, 125, 190,  43, 252, 150,  21, 134,  74, 151,  51, 203,  80, 233,  31, 214,  17, 145,  35,  77, 255, 206,  30,  63, 210, 190, 162, 240,  36,
++    198, 218,  55, 234, 130,  23,  77, 119, 222,  87,  26, 202,  61, 183, 144, 200,  13, 248, 175,  58, 129, 188,  62,  15, 229,  33,  64, 106,  82, 132,  63,   6, 136, 216, 187, 157, 221,  67,  99, 122,  81,  58, 244,   5, 185, 123, 253,   8, 188,  54, 133,  67, 244, 113, 168,  52, 139, 117, 235,  80,  17, 130, 103,  71,
++     18, 148, 110, 186,  91, 213, 241, 157,   3, 191, 106, 127, 237,  97,  30, 222, 107,  44, 138,  22, 219, 166,  81, 208,  96, 167, 201, 220,  19, 243, 184,  93, 237,  78,  16,  93,  31, 170,   3, 201, 223, 172, 108, 204,  35, 166,  65, 117, 145, 223,  99, 163, 198,   8, 187, 231,  89,   4, 173, 142, 249,  58, 222, 175,
++     92, 230,  30,  69, 166,  14, 105,  57, 178, 250,  49, 160,  14,  69, 133, 168,  79, 154, 228,  91, 114,  37, 234, 122,  47, 138,   2, 152, 120, 166,  38, 145, 202,  51, 128, 249, 195, 111, 238, 155,  19,  46, 143,  82, 238,  95, 215,  28,  85, 177,  12, 236,  46,  95, 128,  24, 155, 221,  46, 100,  32, 184, 116,  45,
++    167, 126, 206, 252,  48, 146, 198, 129,  31, 143,  76, 216, 176, 227, 197,  54, 244,   8, 181,  69, 197, 148,   7, 162, 198,  73, 250,  90,  54, 210,  74,  23, 110, 176, 213,  44, 140,  78,  53, 133,  92, 188, 218,  13, 127,  48, 150, 193, 241,  40, 124,  79, 140, 215,  59, 201,  74, 181, 123, 196, 215, 153,   9, 240,
++     59,  80,   1, 139, 100, 225,  74, 234,  90, 208,  22, 101,  43, 120,  89,  24, 116, 212, 127,  28, 251,  56, 101, 241,  25, 113, 190,  30, 226, 105, 191, 252, 152,   0,  72, 163,  12, 230, 178,  33, 250, 117,  66, 158, 228, 182,   3, 109,  63, 155, 209, 185,  26, 153, 249, 110,  33, 243,  60,  22,  88,  67, 133, 203,
++    152, 194, 113, 184,  33, 173,   7,  46, 170, 114, 189, 244, 139,   1, 237, 144, 190,  93,  50, 161, 215, 134, 184,  83, 218,  60, 170, 133, 161,   7, 130,  58, 221,  91, 238, 116, 201, 101, 212,  72, 166,  24, 198,  38, 100,  77, 247, 138, 221,  20, 106,  66, 229,  84,   0, 171, 136,  94, 151, 227, 167, 254, 102,  34,
++     16, 245,  50, 229,  87, 214, 120, 154, 248,  11,  59, 157,  80, 211, 163,  66,  36, 173, 232, 104,  16,  71,  34, 157, 124,  10, 236,  77,  40, 240,  84, 172,  36, 124, 185,  25,  62, 147,  17, 124, 221, 106, 241, 136, 175,  18, 203,  53,  89, 172, 251,  45, 166, 122, 192,  55, 231,  16, 204, 116,   3,  48, 175, 224,
++    142,  98, 166,  21, 151,  56, 197, 102,  68, 216, 123,  31, 179,  47, 106, 205, 249,   5,  76, 140, 191, 116, 228, 199,  46, 143, 211, 102, 200, 117, 187,  17, 142, 207,  47, 157, 254,  89, 194,  51, 152,   1,  85,  54, 223, 123, 160,  32, 196, 119,   8, 145, 203,  19, 103, 213,  81, 180,  40,  74, 143, 208, 120,  83,
++     62, 201, 126,  76, 250, 133,  19, 228,  36, 146, 198, 239,  96, 226,  14, 129,  85, 150, 199,  44, 245, 171,   1,  87, 255,  69, 178,  16,  57, 148, 217,  71, 246, 103,  79, 214, 132,  39, 176, 244,  75, 206, 162, 191,  29,  70, 102, 235, 134,  68, 215,  99,  74, 243, 139,  36, 155, 126, 248, 191,  97, 238,  26, 186,
++    242,   5, 220,  41, 189,  96, 175,  83, 164, 107,  75,  20, 137,  63, 193, 157,  51, 111, 218,  26,  93,  59, 148, 108, 186,  32, 120, 160, 248,  27,  98,  48, 160,  10, 180,  22, 112, 229,  11, 102, 128,  42, 231, 115, 143, 254, 205,  13, 180,  37, 238, 186,  29, 162,  61, 234,   6, 107,  58, 159,  15,  68, 153,  45,
++    135,  87, 177, 111,  14, 215,  47, 241,   4, 185,  51, 213, 172, 114, 246,  28, 229, 169,  68, 132, 162, 234, 206,  22, 139, 214,  92, 226,  81, 182, 137, 230, 195, 122, 224,  53, 169,  71, 141, 219, 173,  23,  95,  65,   6, 168,  90,  55, 155,  87, 143,  53, 124, 212,  87, 196, 171, 216,  29, 227, 127, 197, 223, 105,
++    204, 152,  55, 234, 160,  68, 142, 115, 203, 131, 254, 153,   9,  81,  42, 178,  94,  16, 253, 188,   9, 121,  47,  79, 242,  58,   7, 131,  39, 209,   2, 112,  35,  83, 146, 244,  90, 204,  33,  60, 198, 146, 246, 185, 220,  38, 129, 189, 231, 115,   2, 174, 253,  12, 113,  44, 132,  75, 100, 178,  49,  86, 169,  18,
++     72, 255,  26, 128, 199, 102,  29, 222,  62,  88,  31,  99, 233, 198, 149, 119, 212, 141,  43, 106,  76, 224, 183, 164, 112, 152, 202, 175,  63, 158,  91, 253, 176,  61, 199,   6, 128, 155, 251,  98,   4,  73, 121,  49, 152, 109, 239,  73,  27, 202, 221,  75, 100, 185, 149, 239,  16, 193, 253, 147,   4, 243, 120,  39,
++    221, 106, 174,  80,   0, 243, 181, 153,  13, 168, 195,  48, 127,  65, 220,   1,  60,  84, 204, 236, 154,  32,  96,  15, 233,  35,  99, 244, 114, 228,  54, 133,  15, 220, 105,  44, 179,  21, 115, 183, 235, 166, 203,  17,  82, 212,  10, 166, 104,  50, 132, 158,  33,  59, 207,  81, 165,  61,  38, 116, 200,  65, 142, 188,
++      8, 132,  41, 217, 150,  89,  53, 126, 246, 110, 224, 144, 179,  28, 104, 244, 184, 158,  23, 128,  58, 200, 134, 216,  54, 194,  74,  13, 147,  23, 172, 207,  75, 160, 122, 239,  68, 226,  48,  79, 135,  40, 103, 242, 182, 137,  61, 197, 145, 245,  17, 195, 231, 129,  22, 110, 222, 141,  93, 217, 163,  22, 231,  89,
++    156, 209, 182,  61, 119, 229,  35, 207,  78,  23,  70,  10, 250,  84, 165, 122,  39, 231,  98, 178,   6, 247,  72, 171, 118, 140, 179, 220,  86, 191,  38, 101, 237,  22, 192,  87, 205, 133, 162, 212,  15, 226,  65, 157,  29,  94, 252,  41,  86, 179,  67, 111,  87, 174, 249,  48, 188,   8, 236,  32,  77, 108, 175,  57,
++};
+ static const u8 kompakt_bayer4[16] = {
+      0,  8,  2, 10,
+     12,  4, 14,  6,
+@@ -189,20 +266,88 @@
+     }
+ }
+ 
+-/* Spread each matrix cell over the cut range, on meink's grey scale (the sum of three bytes, 0..765). */
++/* Spread each matrix cell over the cut range, on the toned grey (0..255). */
+ static void kompakt_bayer_thresholds(void)
+ {
+-    unsigned int lo = kompakt_cut_lo * 3, span = (kompakt_cut_hi - kompakt_cut_lo) * 3, i;
++    unsigned int lo = kompakt_cut_lo, span = kompakt_cut_hi - kompakt_cut_lo, i;
+ 
+     for (i = 0; i < 64; i++)
+         kompakt_thr8[i] = lo + (kompakt_bayer8[i] * 2 + 1) * span / 128;
+     for (i = 0; i < 16; i++)
+         kompakt_thr4[i] = lo + (kompakt_bayer4[i] * 2 + 1) * span / 32;
++    for (i = 0; i < 64 * 64; i++)
++        kompakt_thrb[i] = lo + (kompakt_blue64[i] * 2 + 1) * span / 512;
+     for (i = 0; i < 64; i++)
+         kompakt_hthr[i] = 128 + (kompakt_bayer8[i] * 2 - 63) * kompakt_step / 16;
+ }
+ 
+ /*
++ * The mode's tone curve: meink's 8-bit transfer. meink applies it to the grey
++ * before its own dither, so ours has to as well, or every grey comes out
++ * lighter than in Normal and text thinner. Identity without one.
++ */
++static void kompakt_tone(u8 *t)
++{
++    const u8 *src = NULL;
++    u8 *display, *img;
++    unsigned int i;
++
++    if (g_einkData.einkDrv) {
++        display = *(u8 **)g_einkData.einkDrv;
++        img = display ? *(u8 **)(display + KOMPAKT_DISP_IMAGE) : NULL;
++        if (img)
++            src = img + KOMPAKT_IMAGE_LUT8;
++    }
++    for (i = 0; i < 256; i++)
++        t[i] = src ? READ_ONCE(src[i]) : i;
++}
++
++/*
++ * kompakt_wf_dither_light: the toned grey of a dithered pixel, lifted by L/3 of
++ * t (255 - t) / 255 (at 3 that undoes a square; the ends stay put). Edges keep
++ * the mode's curve, so text keeps its weight.
++ */
++static void kompakt_lift(u8 *l)
++{
++    unsigned int i, light = READ_ONCE(kompakt_light);
++
++    for (i = 0; i < 256; i++)
++        l[i] = i + i * (255 - i) * light / (3 * 255);
++}
++
++/* A pixel's toned grey: meink's own average of the three bytes, then the curve. */
++static inline unsigned int kompakt_toned(u32 p, const u8 *t)
++{
++    return t[((p & 0xff) + ((p >> 8) & 0xff) + ((p >> 16) & 0xff)) / 3];
++}
++
++/* The frame in toned greys (0..255), for the edge test; false without memory. */
++static bool kompakt_grey_pass(const u32 *in, const u8 *t)
++{
++    unsigned int i;
++
++    if (!kompakt_grey)
++        kompakt_grey = vmalloc(KOMPAKT_FB_W * KOMPAKT_FB_H);
++    if (!kompakt_grey)
++        return false;
++    for (i = 0; i < KOMPAKT_FB_W * KOMPAKT_FB_H; i++)
++        kompakt_grey[i] = kompakt_toned(in[i], t);
++    return true;
++}
++
++/* An edge: a jump of at least t to the pixel left, right, above or below. */
++static bool kompakt_is_edge(unsigned int x, unsigned int y, int t)
++{
++    const u8 *g = kompakt_grey + y * KOMPAKT_FB_W + x;
++    int c = *g;
++
++    return (x > 0 && abs(c - g[-1]) >= t) ||
++           (x + 1 < KOMPAKT_FB_W && abs(c - g[1]) >= t) ||
++           (y > 0 && abs(c - g[-KOMPAKT_FB_W]) >= t) ||
++           (y + 1 < KOMPAKT_FB_H && abs(c - g[KOMPAKT_FB_W]) >= t);
++}
++
++/*
+  * Ordered error diffusion (J. van der Zwan): Atkinson's diffusion, whose 6/8 error keeps
+  * highlights and shadows clean, rounding against a Bayer threshold held close to the middle.
+  */
+@@ -213,7 +358,13 @@
+     int x;                              /* signed: the diffusion writes to x - 1 */
+     unsigned int y;
+     int lo = READ_ONCE(kompakt_cut_lo), hi = READ_ONCE(kompakt_cut_hi);
++    int edge = READ_ONCE(kompakt_edge);
++    u8 tone[256], lift[256];
+ 
++    kompakt_tone(tone);
++    kompakt_lift(lift);
++    if (edge && !kompakt_grey_pass(src, tone))
++        edge = 0;
+     if (!kompakt_bayer_buf)
+         kompakt_bayer_buf = vmalloc(KOMPAKT_FB_BYTES);
+     if (!kompakt_err)
+@@ -231,10 +382,16 @@
+         memset(e2 - 2, 0, KOMPAKT_ERR_ROW * sizeof(s16));  /* it held row y - 1 */
+         for (x = 0; x < KOMPAKT_FB_W; x++, in++, out++) {
+             u32 p = *in;
+-            int g = (((p & 0xff) + ((p >> 8) & 0xff) + ((p >> 16) & 0xff)) * 85) >> 8;
++            int g = kompakt_toned(p, tone);
+             int v, q, e;
+ 
+-            /* Outside the cut range the pixel is pure and passes no error on. */
++            /* An edge is pure and passes no error on: text stays crisp, cut where Normal cuts it. */
++            if (edge && g > lo && g < hi && kompakt_is_edge(x, y, edge)) {
++                *out = (p & 0xff000000) | (g > KOMPAKT_EDGE_CUT ? 0x00ffffff : 0);
++                continue;
++            }
++            /* So is a pixel outside the cut range, on the lifted grey. */
++            g = lift[g];
+             if (g >= hi || g <= lo) {
+                 *out = (p & 0xff000000) | (g >= hi ? 0x00ffffff : 0);
+                 continue;
+@@ -254,28 +411,41 @@
+     return kompakt_bayer_buf;
+ }
+ 
+-/* meink greys a pixel as the sum of its three low bytes (0..765); threshold that against the tiled matrix. */
++/* The toned grey of each pixel against the tiled matrix. */
+ static void *kompakt_bayer(const void *src)
+ {
+     const u32 *in = src;
+     u32 *out;
+     unsigned int x, y;
+-    int coarse = READ_ONCE(kompakt_dither) == 2;
+-    unsigned int lo = READ_ONCE(kompakt_cut_lo) * 3, hi = READ_ONCE(kompakt_cut_hi) * 3;
++    int mode = READ_ONCE(kompakt_dither), coarse = mode == 2, blue = mode == 4;
++    unsigned int lo = READ_ONCE(kompakt_cut_lo), hi = READ_ONCE(kompakt_cut_hi);
++    int edge = READ_ONCE(kompakt_edge);
++    u8 tone[256], lift[256];
+ 
++    kompakt_tone(tone);
++    kompakt_lift(lift);
++    if (edge && !kompakt_grey_pass(src, tone))
++        edge = 0;
+     if (!kompakt_bayer_buf)
+         kompakt_bayer_buf = vmalloc(KOMPAKT_FB_BYTES);
+     if (!kompakt_bayer_buf)
+         return NULL;
+     out = (u32 *)kompakt_bayer_buf;
+     for (y = 0; y < KOMPAKT_FB_H; y++) {
+-        const u16 *row = coarse ? kompakt_thr4 + (y & 3) * 4 : kompakt_thr8 + (y & 7) * 8;
++        const u8 *row = blue ? kompakt_thrb + (y & 63) * 64 :
++                         coarse ? kompakt_thr4 + (y & 3) * 4 : kompakt_thr8 + (y & 7) * 8;
++        unsigned int xm = blue ? 63 : coarse ? 3 : 7;
+ 
+         for (x = 0; x < KOMPAKT_FB_W; x++, in++, out++) {
+             u32 p = *in;
+-            unsigned int sum = (p & 0xff) + ((p >> 8) & 0xff) + ((p >> 16) & 0xff);
+-            bool white = sum >= hi || (sum > lo && sum > row[coarse ? x & 3 : x & 7]);
++            unsigned int g = edge ? kompakt_grey[y * KOMPAKT_FB_W + x] : kompakt_toned(p, tone);
++            unsigned int gl = lift[g];
++            bool white = gl >= hi || (gl > lo && gl > row[x & xm]);
+ 
++            /* An edge between the cut limits is cut where Normal cuts it, on the mode's curve, not patterned. */
++            if (edge && g > lo && g < hi && kompakt_is_edge(x, y, edge))
++                white = g > KOMPAKT_EDGE_CUT;
++
+             *out = (p & 0xff000000) | (white ? 0x00ffffff : 0);
+         }
+     }
+@@ -325,6 +495,19 @@
+ 	return snprintf(buf, PAGE_SIZE, "%s\n", EinkGetWaveformModeName(type));
+ }
+ 
++/* Kompakt: the waveform last written here; meink switches to A2 itself on every unblank. */
++static int kompakt_user_wf = kEinkWaveformInvalid;
++
++static void kompakt_restore_wf(const char *why)
++{
++    int type = READ_ONCE(kompakt_user_wf);
++
++    if (type == kEinkWaveformInvalid || g_einkData.einkDrv == 0)
++        return;
++    EinkSetWaveformType(g_einkData.einkDrv, type);
++    pr_info("einkwake: %s, back to %s\n", why, EinkGetWaveformModeName(type));
++}
++
+ static ssize_t waveform_type_store(struct device *dev,
+ 				    struct device_attribute *attr,
+ 				    const char *buf, size_t count)
+@@ -344,6 +527,7 @@
+         
+     if (strcmp(typeName, KOMPAKT_AUTO_NAME) == 0)
+     {
++        WRITE_ONCE(kompakt_user_wf, kEinkWaveformInvalid);
+         eink_auto_enable(1, kompakt_auto_apply);
+         kompakt_auto_apply(0);          /* start settled */
+         pr_info("einkauto: enabled\n");
+@@ -354,6 +538,7 @@
+     type = EinkDecodeWaveformModeName(typeName);
+     if (type != kEinkWaveformInvalid)
+     {
++        WRITE_ONCE(kompakt_user_wf, type);
+         EinkSetWaveformType(g_einkData.einkDrv, type);
+     }
+     else
+@@ -1128,9 +1313,9 @@
+     if (group != WF_A2)
+         return 0;
+ 
+-    /* Kompakt: any frame count below the band's own; a2short is the alias for 5. */
++    /* Kompakt: up to 7 any count below the band's own; 8 and 9 (Caster's) only lengthen. a2short is 5. */
+     w = WF_A2N(flags);
+-    if (w && w < n) {
++    if (w > WF_A2_STOCK_N ? w > n : w && w < n) {
+         nn = w;
+         done |= WF_A2SHORT;
+     }
+@@ -1144,7 +1329,7 @@
+     if (!done)
+         return 0;
+ 
+-    memset(out + 1, 0, (n + 1) * WF_FRAME);
++    memset(out + 1, 0, (max(n, nn) + 1) * WF_FRAME);
+     out[0] = nn;
+     for (f = 0; f < nn; f++) {
+         wf_put(out, f, 0, 15, 2);
+@@ -1437,7 +1622,7 @@
+ static ssize_t kompakt_wf_a2frames_store(struct device *dev, struct device_attribute *attr,
+                                          const char *buf, size_t count)
+ {
+-    return wf_store_val(buf, count, WF_A2N_SHIFT, WF_A2N_MASK, 2, 6);
++    return wf_store_val(buf, count, WF_A2N_SHIFT, WF_A2N_MASK, 2, 9);
+ }
+ static ssize_t kompakt_wf_gl16trim_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+@@ -1458,12 +1643,12 @@
+ {
+     unsigned int v;
+ 
+-    if (kstrtouint(buf, 10, &v) || v > 3)
++    if (kstrtouint(buf, 10, &v) || v > 4)
+         return -EINVAL;
+     WRITE_ONCE(kompakt_dither, v);
+     kompakt_set_dither(READ_ONCE(kompakt_dither_req));  /* re-route whatever is dithering now */
+     kompakt_request_repaint();
+-    pr_info("einkwf: dither=%u (0 meink FS, 1 Bayer 8x8, 2 Bayer 4x4, 3 Atkinson over Bayer)\n", v);
++    pr_info("einkwf: dither=%u (0 meink FS, 1 Bayer 8x8, 2 Bayer 4x4, 3 Atkinson over Bayer, 4 blue noise)\n", v);
+     return count;
+ }
+ 
+@@ -1560,7 +1745,43 @@
+     return count;
+ }
+ static DEVICE_ATTR(kompakt_wf_dither_step, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_dither_step_show, kompakt_wf_dither_step_store);
++
++static ssize_t kompakt_wf_dither_edge_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++    return snprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(kompakt_edge));
++}
++static ssize_t kompakt_wf_dither_edge_store(struct device *dev, struct device_attribute *attr,
++                                            const char *buf, size_t count)
++{
++    unsigned int v;
++
++    if (kstrtouint(buf, 10, &v) || v > 255)
++        return -EINVAL;
++    WRITE_ONCE(kompakt_edge, v);
++    kompakt_request_repaint();
++    pr_info("einkwf: dither edge %u (0 off)\n", v);
++    return count;
++}
++static DEVICE_ATTR(kompakt_wf_dither_edge, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_dither_edge_show, kompakt_wf_dither_edge_store);
+ 
++static ssize_t kompakt_wf_dither_light_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++    return snprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(kompakt_light));
++}
++static ssize_t kompakt_wf_dither_light_store(struct device *dev, struct device_attribute *attr,
++                                             const char *buf, size_t count)
++{
++    unsigned int v;
++
++    if (kstrtouint(buf, 10, &v) || v > 3)
++        return -EINVAL;
++    WRITE_ONCE(kompakt_light, v);
++    kompakt_request_repaint();
++    pr_info("einkwf: dither light %u (0 the mode's curve, 3 lightest)\n", v);
++    return count;
++}
++static DEVICE_ATTR(kompakt_wf_dither_light, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_dither_light_show, kompakt_wf_dither_light_store);
++
+ static DEVICE_ATTR(refresh_time, S_IWUSR|S_IWGRP | S_IRUGO, refresh_time_show, refresh_time_store);
+ static DEVICE_ATTR(pixelbits, S_IWUSR|S_IWGRP | S_IRUGO, pixelbits_show, pixelbits_store);
+ static DEVICE_ATTR(waveform_mode, S_IWUSR|S_IWGRP | S_IRUGO, waveform_type_show, waveform_type_store);
+@@ -1609,6 +1830,8 @@
+     &dev_attr_kompakt_wf_dither.attr,
+     &dev_attr_kompakt_wf_dither_cut.attr,
+     &dev_attr_kompakt_wf_dither_step.attr,
++    &dev_attr_kompakt_wf_dither_edge.attr,
++    &dev_attr_kompakt_wf_dither_light.attr,
+ 
+ 	NULL,
+ };
+@@ -1755,6 +1978,9 @@
+     release_screen_buffer();
+ }
+ 
++/* Kompakt: the glass holds an awake screen or the sleep picture, not an AOD. */
++static atomic_t kompakt_needs_clean = ATOMIC_INIT(1);
++
+ static int kompakt_update(void *ptr)
+ {
+     if (atomic_read(&kompakt_powering_down) || atomic_read(&kompakt_final)) {
+@@ -1795,7 +2021,16 @@
+ static int kompakt_powerdown_end(struct notifier_block *nb,
+                                  unsigned long event, void *data)
+ {
++    struct fb_event *evdata = data;
++
++    /* After meink's notifier: its unblank sets A2, the user's waveform goes back on. */
++    if (event == FB_EARLY_EVENT_BLANK && evdata && evdata->data &&
++        *(int *)evdata->data == FB_BLANK_UNBLANK) {
++        atomic_set(&kompakt_needs_clean, 1);
++        kompakt_restore_wf("unblank");
++    }
+     if (kompakt_is_powerdown(event, data)) {
++        atomic_set(&kompakt_needs_clean, 1);
+         atomic_set(&kompakt_powering_down, 0);
+         pr_info("kompakt-sleepimg: power-down painted, %d frame(s) held off it\n",
+                 atomic_read(&kompakt_held));
+@@ -1814,10 +2049,34 @@
+ };
+ 
+ /* After EinkInit(): meink has registered its hook and notifier by then. */
++extern void register_eink_aod_func(void (*func));
++
++static int (*meink_aod)(unsigned int on);
++
++/*
++ * meink sets A2 on every DOZE entry. Entering AOD over an awake screen or the
++ * sleep picture, go through GL16 first with the skip flag down: meink's own
++ * GL16 to A2 switch then clears black, white and redraws the newest frame.
++ * Minute ticks re-enter DOZE over the AOD itself and are left alone.
++ */
++static int kompakt_aod(unsigned int on)
++{
++    if (on && g_einkData.einkDrv && atomic_xchg(&kompakt_needs_clean, 0)) {
++        u8 *render = *(u8 **)((u8 *)g_einkData.einkDrv + KOMPAKT_MEINK_RENDER);
++
++        if (render)
++            WRITE_ONCE(*(u32 *)(render + KOMPAKT_RENDER_SKIP_CLEAR), 0);
++        EinkSetWaveformType(g_einkData.einkDrv, kEinkWaveformGL16);
++        pr_info("einkwake: AOD over an awake screen, meink clears it\n");
++    }
++    return meink_aod(on);
++}
++
+ static void kompakt_hold_init(void)
+ {
+     struct module *mod = meink_get();
+     unsigned long fn = mod ? meink_symbol(mod, "eink_update_screen", 4) : 0;
++    unsigned long aod = mod ? meink_symbol(mod, "eink_always_on_display", 4) : 0;
+ 
+     if (!fn) {
+         if (mod)
+@@ -1831,6 +2090,12 @@
+     fb_register_client(&kompakt_powerdown_end_nb);
+     register_eink_refresh_func(kompakt_update);
+     pr_info("kompakt-sleepimg: pump frames held across power-down (hook wrapped after EinkInit)\n");
++    if (aod) {
++        meink_aod = (int (*)(unsigned int))aod;
++        register_eink_aod_func(kompakt_aod);
++    } else {
++        pr_err("einkwake: eink_always_on_display not found, AOD stays on A2\n");
++    }
+ }
+ 
+ static void kompakt_hold_exit(void)
+@@ -1841,6 +2106,10 @@
+     kompakt_err = NULL;
+     if (!meink_update)
+         return;
++    if (meink_aod) {
++        register_eink_aod_func(meink_aod);
++        meink_aod = NULL;
++    }
+     register_eink_refresh_func(meink_update);
+     fb_unregister_client(&kompakt_powerdown_end_nb);
+     fb_unregister_client(&kompakt_powerdown_begin_nb);
+-- 
+2.43.0
+

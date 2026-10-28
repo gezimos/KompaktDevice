@@ -7,9 +7,7 @@ kernel tree itself is Mudita's and is not committed here.
 patches/             our kernel patches
 build-kernel.sh      builds Image.gz and the modules
 stub/                stands in for the eink/ directory Mudita's release leaves out
-patch-aod-boot.sh    older route: patches Mudita's stock kernel instead of building one
 trace-eink-spi.py    adds an SPI trace to the e-ink transport
-drivers/misc/kompakt/  an old e-ink shim; nothing loads it any more
 ```
 
 ## Get the source
@@ -45,9 +43,11 @@ and comes from the vendor partition.
 | `0032-kompakt-auto-no-burst-flash.patch` | Auto's moving phase sets meink's one-shot skip-clear flag (render `+0x244`) before its GL16 to A2 switch, so a scroll burst no longer starts with a black and white flash |
 | `0033-kompakt-bayer-dither.patch` | `kompakt_wf_dither`: `1` or `2` replaces meink's Floyd-Steinberg with an ordered Bayer pass (8x8 or 4x4) done in the loader, on exactly the frames the app or Auto asked to dither; the pattern stands still between frames. `kompakt_wf_dither_cut` (default `48 208`) leaves greys outside that range pure black or white, so light backgrounds and text edges get no dots. `3` is ordered error diffusion: Atkinson rounding against a Bayer threshold near the middle, spread by `kompakt_wf_dither_step`. `0` (default) is stock |
 | `0034-kompakt-wf-du4.patch` | `kompakt_wf_du4`: the DU2 slot (2 bpp, unused by any mode) drives every grey straight to every other in one push of the GL16 family's charge difference, a balanced 4-grey fast mode at about half of Quality's time. Use with `waveform_mode DU2`. Off by default |
-| `withdrawn/0022-kompakt-spi-write-clock.patch` | not applied: a faster SPI clock, after which the panel stopped refreshing. Kept as a record |
+| `0035-kompakt-eink-waveform-additions.patch` | additions on meink's own drawing: Fast speeds 8 and 9, blue noise, edge cut, the mode's tone curve for our dithers, dither brightness, the partial refresh box fix, the chosen mode back after every wake, and meink's clear before the always-on display. Modules only |
+| `0036-kompakt-aod-straight-from-an-awake-display.patch` | DOZE requested while the display is awake marks the LCM low power, so locking can go straight to the always-on display with no panel power-down and no sleep picture under it |
+| `0037-kompakt-warm-flash-led-outlives-the-torch.patch` | While the warm flash LED is held on from its sysfs switch, the camera HAL's torch on/off and its device close switch only the white LED, so turning the flashlight tile off no longer darkens the warm LED behind its tile's back |
 
-Applying 0020, 0021, 0023, 0024, 0025 and 0026 reproduces the shipping kernel tree exactly.
+Applying every patch above in order, after the stub, reproduces the shipping kernel tree exactly.
 
 ## Build
 
@@ -81,16 +81,6 @@ With `VENDOR_MODULES=<folder of the stock .ko files>` it also checks all eight
 prebuilt modules (meink, meink_hal, Wi-Fi, Bluetooth, GPS, FM, headset) with
 `check-module-crcs.py` and stops on any mismatch. Any config change that shifts
 those CRCs makes them refuse to load, so the kernel config is effectively fixed.
-
-## patch-aod-boot.sh
-
-The route before we built our own kernel: it patches 8 bytes of Mudita's stock
-kernel so the always-on display lets the phone sleep, and repacks the boot
-image.
-
-```sh
-kernel/patch-aod-boot.sh stock-boot.img boot-aod.img
-```
 
 ## trace-eink-spi.py
 

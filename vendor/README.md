@@ -10,7 +10,6 @@ scripts/check-vendor-policy.sh  compiles the vendor policy with a system image's
 scripts/*.sh               one change each to a stage directory (see below)
 tools/patch-fp-navigator.py  turns on navigation in the fingerprint HAL
 mudita/                    Mudita's vendor files; the blobs are not committed
-scripts/withdrawn/, tools/withdrawn/   old experiments that never shipped
 ```
 
 ## Build
@@ -33,7 +32,7 @@ modem (see Vendor.md, "Two editions").
 ## What ours changes
 
 ```
-lib/modules/meink_hal.ko, meink_loader.ko   ours, GPL, built from kernel/patches/0020
+lib/modules/meink_hal.ko, meink_loader.ko   ours, GPL, built from kernel/patches/0020 and 0035
 lib/modules/meink.ko                        Mudita's, with our pictures (apply-boot-logo.sh)
 lib64/hw/fpsensor_fingerprint.default.so    navigation on (tools/patch-fp-navigator.py)
 etc/fpsensor_nav.ini                        its settings (apply-fp-navigator.sh)

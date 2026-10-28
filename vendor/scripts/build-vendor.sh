@@ -7,11 +7,13 @@
 # WORK holds the inputs and receives vendor-<build number>.img and its log:
 #   vstage2/                    the labelled stage (STAGE= to use another)
 #   vendorx/                    the stock vendor, extracted, for comparison
-#   meink_loader-poweroff.ko    our meink_loader build
-#   meink_hal-217.ko            the meink_hal the stage must carry
+#   meink_hal-0035.ko           our meink_hal build (kernel patches 0020, 0035)
+#   meink_loader-0035.ko        our meink_loader build (kernel patches 0020, 0035)
 #   meink-kompakt-pictures.ko   meink.ko with our pictures (apply-boot-logo.sh)
 # SYSTEM_IMG is the system image this vendor ships with; its policy is compiled
 # together with the vendor's.
+# EDITION=usa with STAGE=<usa stage> (make-usa-vendor.sh) names the image
+# vendor-<build number>-usa.img.
 # LINEAGE must have built android.hardware.light-service.kompakt (KompaktOS
 # patch hardware_lineage_interfaces/0001): m android.hardware.light-service.kompakt
 BN=${1:?usage: build-vendor.sh <build number>}
@@ -20,12 +22,14 @@ L=${LINEAGE:?set LINEAGE to a built LineageOS tree}
 SYS=${SYSTEM_IMG:?set SYSTEM_IMG to the system image this vendor ships with}
 V=${STAGE:-$W/vstage2}
 HERE=$(cd "$(dirname "$0")/../.." && pwd)
-exec > $W/vendor$BN.log 2>&1
+E=${EDITION:+-$EDITION}
+exec > $W/vendor$BN$E.log 2>&1
 set -euxo pipefail
 export V
 AVB=$L/out/host/linux-x86/bin/avbtool
-KO=$W/meink_loader-poweroff.ko
-IMG=$W/vendor-$BN.img
+KO=$W/meink_loader-0035.ko
+HAL=$W/meink_hal-0035.ko
+IMG=$W/vendor-$BN$E.img
 LIGHTS=$L/out/target/product/generic_arm64/vendor/bin/hw/android.hardware.light-service.kompakt
 
 # gate: loader build and vermagic
@@ -34,10 +38,10 @@ grep -qa "hook wrapped after EinkInit" $KO || { echo GATE_LOADER_NO_HOLD; exit 1
 grep -qa "kompakt-poweroff" $KO || { echo GATE_LOADER_NO_POWEROFF_HOOK; exit 1; }
 grep -qa "acquire_screen_buffer" $KO || { echo GATE_LOADER_NO_DRAIN; exit 1; }
 grep -qa "vermagic=4.19.191-00095-g83b1ab1a9a4b-dirty" $KO || { echo GATE_VERMAGIC; exit 1; }
+grep -qa "4 blue noise" $KO || { echo GATE_LOADER_NOT_0035; exit 1; }
+grep -qa "no box budget left" $HAL || { echo GATE_HAL_NOT_0035; exit 1; }
 # gate: the lights HAL is built
 test -f $LIGHTS || { echo GATE_LIGHTS_HAL_NOT_BUILT; exit 1; }
-# gate: meink_hal.ko unchanged
-test "$(md5sum < $V/lib/modules/meink_hal.ko)" = "$(md5sum < $W/meink_hal-217.ko)" || { echo GATE_HAL_NOT_217; exit 1; }
 # gate: meink.ko from apply-boot-logo.sh, only picture bytes changed
 KL=$W/meink-kompakt-pictures.ko
 test "$(md5sum < $KL | cut -d' ' -f1)" = "e6e0eb22b4ac73fd1d38555e9ed5fb84" || { echo GATE_LOGO_KO_MD5; exit 1; }
@@ -47,16 +51,14 @@ cp $KL $V/lib/modules/meink.ko
 chown root:root $V/lib/modules/meink.ko; chmod 644 $V/lib/modules/meink.ko
 python3 -c "import os;os.setxattr('$V/lib/modules/meink.ko', b'security.selinux', b'u:object_r:vendor_file:s0\0')"
 
+# our meink_hal and meink_loader; removes what an install of the parked open driver left
+bash $HERE/vendor/scripts/apply-open-eink.sh $V $W off
 bash $HERE/vendor/scripts/apply-eink-access.sh $V
 bash $HERE/vendor/scripts/apply-wifi-calling-access.sh $V
-
-cp $KO $V/lib/modules/meink_loader.ko
-chown root:root $V/lib/modules/meink_loader.ko; chmod 644 $V/lib/modules/meink_loader.ko
-python3 -c "import os;os.setxattr('$V/lib/modules/meink_loader.ko', b'security.selinux', b'u:object_r:vendor_file:s0\0')"
 python3 - <<'PY'
 import os, sys
 V = os.environ['V']
-for p in ('lib/modules/meink_loader.ko', 'etc/selinux/vendor_sepolicy.cil', 'etc/init/hw/init.project.rc'):
+for p in ('lib/modules/meink_hal.ko', 'lib/modules/meink_loader.ko', 'lib/modules/modules.dep', 'etc/selinux/vendor_sepolicy.cil', 'etc/init/hw/init.project.rc'):
     label = os.getxattr(os.path.join(V, p), 'security.selinux')
     print('LABEL', p, label)
     if not label.startswith(b'u:object_r:vendor_'):
@@ -94,9 +96,12 @@ PATH=$L/out/host/linux-x86/bin:$PATH $AVB add_hashtree_footer \
 
 # read back what the image carries
 IMG_KO=$(debugfs -R "cat /lib/modules/meink_loader.ko" $IMG 2>/dev/null | md5sum | cut -d' ' -f1)
+IMG_HAL=$(debugfs -R "cat /lib/modules/meink_hal.ko" $IMG 2>/dev/null | md5sum | cut -d' ' -f1)
 IMG_MEINK=$(debugfs -R "cat /lib/modules/meink.ko" $IMG 2>/dev/null | md5sum | cut -d' ' -f1)
 echo "IMAGE_MEINK_MATCH=$([ "$IMG_MEINK" = "$(md5sum < $KL | cut -d' ' -f1)" ] && echo yes || echo NO)"
 echo "IMAGE_LOADER_MATCH=$([ "$IMG_KO" = "$(md5sum < $KO | cut -d' ' -f1)" ] && echo yes || echo NO)"
+echo "IMAGE_HAL_MATCH=$([ "$IMG_HAL" = "$(md5sum < $HAL | cut -d' ' -f1)" ] && echo yes || echo NO)"
+echo "IMAGE_OPEN_DRIVER=$( (debugfs -R "ls /lib/modules" $IMG; for f in /lib/modules/modules.dep /etc/init/hw/init.project.rc /build.prop; do debugfs -R "cat $f" $IMG; done) 2>/dev/null | grep -c kompakt_eink)"
 echo "IMAGE_GENFSCON=$(debugfs -R "cat /etc/selinux/vendor_sepolicy.cil" $IMG 2>/dev/null | grep -c 'genfscon sysfs /einkinfo/sleep_image ')"
 echo "IMAGE_IPSEC_MON_READPRIV=$(debugfs -R "cat /etc/selinux/vendor_sepolicy.cil" $IMG 2>/dev/null | grep -cxF '(allow ipsec_mon self (netlink_route_socket (nlmsg_readpriv)))')"
 echo "IMAGE_CHMOD=$(debugfs -R "cat /etc/init/hw/init.project.rc" $IMG 2>/dev/null | grep -c 'chmod 0666 /sys/einkinfo/sleep_image$')"
@@ -106,6 +111,7 @@ echo "IMAGE_INI=$(debugfs -R "cat /etc/fpsensor_nav.ini" $IMG 2>/dev/null | grep
 echo "IMAGE_INI_LABEL=$(debugfs -R "ea_get /etc/fpsensor_nav.ini security.selinux" $IMG 2>/dev/null | tr -d '\0\n')"
 echo "IMAGE_USB_MASS_STORAGE_LINKS=$(debugfs -R "cat /etc/init/hw/init.mt6761.usb.rc" $IMG 2>/dev/null | grep -c "mass_storage.usb0 /config/usb_gadget/g1/configs/b.1/f1")"
 echo "IMAGE_USB_NOTE=$(debugfs -R "cat /etc/init/hw/init.mt6761.usb.rc" $IMG 2>/dev/null | grep -c "Kompakt: no mass storage here")"
+echo "IMAGE_MD_APPS=$(debugfs -R "cat /etc/init/init.md_apps.rc" $IMG 2>/dev/null | grep -o 'V236.P[0-9]*' | head -1)"
 echo "IMAGE_BUILD_NUMBER=$(debugfs -R "cat /build.prop" $IMG 2>/dev/null | grep "^ro.vendor.build.version.incremental=")"
 echo "IMAGE_BUILDPROP_LABEL=$(debugfs -R "ea_get /build.prop security.selinux" $IMG 2>/dev/null | tr -d '\0\n')"
 echo "IMAGE_SPEECH_LEVELS=$(debugfs -R "cat /etc/audio_param/SpeechVol_AudioParam.xml" $IMG 2>/dev/null | grep -c 'value="36,29,23,16,10,3,3"')"

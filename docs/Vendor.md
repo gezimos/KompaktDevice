@@ -20,7 +20,7 @@ Our vendor is Mudita's, repacked with these changes:
 
 | file | change |
 |---|---|
-| `lib/modules/meink_hal.ko`, `meink_loader.ko` | ours, GPL, from kernel patch 0020 |
+| `lib/modules/meink_hal.ko`, `meink_loader.ko` | ours, GPL, from kernel patches 0020 and 0035 |
 | `lib/modules/meink.ko` | Mudita's, with our pictures ([Images.md](Images.md)) |
 | `lib64/hw/fpsensor_fingerprint.default.so`, `etc/fpsensor_nav.ini` | fingerprint navigation on (section 6) |
 | `etc/selinux/*.cil` | e-ink and battery nodes reachable, orphaned vendor types bound (section 2, [Battery.md](Battery.md)) |
@@ -32,20 +32,23 @@ It is flashed and shipped with every release.
 
 ## 1. Kernel modules
 
-`vendor/lib/modules/` holds the e-ink trio (`meink_hal.ko`, `meink.ko`,
+`vendor/lib/modules/` holds the e-ink modules (`meink_hal.ko`, `meink.ko`,
 `meink_loader.ko`), `mt6357-accdet.ko` (headset detect), connectivity (`wmt_drv`,
 `bt_drv_connac1x`, `wlan_drv_gen4m`, `wmt_chrdev_wifi`, `connfem`, `gps_drv`,
 `fmradio_drv_mt6631`), `fpsgo`, `met` and `trace_mmstat`.
 
 **`modules.load` is not used.** Modules load from explicit `exec` lines in
 `etc/init/hw/init.project.rc`, e-ink in the order `meink_hal`, `meink`,
-`meink_loader`. A new module needs its own line there.
+`meink_loader`. A new module needs its own line there, and a
+`modules.dep` line, which modprobe resolves it through.
 
 Headset detection is a vendor module, not part of the kernel image.
 `vendor/firmware/` has Wi-Fi, BT, GPU (`rgx.fw`), FM and touch firmware, and no
 e-ink firmware: the controller image is compiled into `meink.ko`.
 
-`lib/modules/kompakt_eink.ko` is an old shim still in the stage; nothing loads it.
+`vendor/scripts/apply-open-eink.sh <stage> <module dir> off` installs our HAL
+and loader and removes what an earlier install of the parked open driver left
+in the stage ([E-inkdriver.md](E-inkdriver.md) §14).
 
 ## 2. SELinux: the e-ink nodes
 
@@ -211,7 +214,7 @@ WORK=<dir> LINEAGE=<tree> SYSTEM_IMG=<system.img> \
 ```
 
 It installs our `meink.ko` pictures (checking that only picture bytes differ
-from stock), `meink_loader.ko`, the e-ink access, the Wi-Fi calling access
+from stock), our `meink_hal.ko` and `meink_loader.ko` (`apply-open-eink.sh ... off`), the e-ink access, the Wi-Fi calling access
 (`apply-wifi-calling-access.sh`: `ipsec_mon` may read the privileged route
 details Android 16 guards, or the tunnel sends nothing), the fingerprint HAL and ini,
 `apply-usb-no-mass-storage.sh` (`USB_ADB_ACM ...`), the lights HAL
@@ -257,8 +260,10 @@ bash vendor/scripts/make-usa-vendor.sh <global stage> <stock USA vendor> <stock 
 
 It swaps only files that differ between the two stock vendors, refuses any file
 we have changed, keeps each file's label, and checks the result names the P6
-modem. Build the image from the USA stage the same way, and ship its own full
-update packages: a phone must get the edition that matches its modem.
+modem. Build its image with `STAGE=<usa stage> EDITION=usa` and the same
+build number, which writes `vendor-<build number>-usa.img`; `IMAGE_MD_APPS`
+reads `V236.P6`. Ship its own full update packages: a phone must get the edition
+that matches its modem.
 
 ### Checks
 

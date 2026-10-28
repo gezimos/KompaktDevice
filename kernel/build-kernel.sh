@@ -38,7 +38,7 @@ make "${M[@]}" Kompakt_defconfig
 make -j"$(nproc)" "${M[@]}" Image.gz modules
 
 echo "== built:"; ls -l "$O/arch/arm64/boot/Image.gz"
-strings "$O/vmlinux" | grep -m1 "^Linux version"
+strings "$O/vmlinux" | grep -m1 "^Linux version" || true
 
 # The prebuilt vendor modules load only if their symbol CRCs match this build.
 # VENDOR_MODULES=<dir with the stock .ko files> makes this a hard gate.

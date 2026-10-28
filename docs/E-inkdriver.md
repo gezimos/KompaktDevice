@@ -24,8 +24,8 @@ write first waits for the panel to report ready.
 | piece | licence | source | ships in | job |
 |---|---|---|---|---|
 | `meink.ko` | proprietary, Mudita | binary only | vendor, `/vendor/lib/modules/` | the render engine: converts frames to the panel format, holds the waveform tables and four built-in pictures, runs the panel state machine |
-| `meink_hal.ko` | GPL | Mudita's `eink_spi_hal.c` + our `kernel/patches/0020` | vendor | SPI transport and panel power. Every byte meink sends passes through it, so partial updates and Auto live here |
-| `meink_loader.ko` | GPL | Mudita's `loader.c` + 0020 | vendor | the SPI driver: probes the panel, calls meink's `EinkInit()`, creates `/sys/einkinfo/` |
+| `meink_hal.ko` | GPL | Mudita's `eink_spi_hal.c` + our `kernel/patches/0020`, `0035` | vendor | SPI transport and panel power. Every byte meink sends passes through it, so partial updates and Auto live here |
+| `meink_loader.ko` | GPL | Mudita's `loader.c` + 0020, 0035 | vendor | the SPI driver: probes the panel, calls meink's `EinkInit()`, creates `/sys/einkinfo/` |
 | `mtkfb` | GPL | `drivers/misc/mediatek/video/mt6765/videox/mtkfb.c` + 0020, 0023 | kernel image, `boot.img` | the framebuffer: hands each new frame to meink, drives the AOD transitions, inverts recovery |
 
 The two GPL modules come from `drivers/misc/mudita/eink_loader/` in Mudita's
@@ -39,11 +39,10 @@ and runs on stock boot and vendor; features that need our images are simply not
 offered there.
 
 `init.project.rc` loads the modules explicitly, in the order `meink_hal`,
-`meink`, `meink_loader`; `modules.load` is ignored on this device. The LineageOS
-recovery in our boot image carries its own copy of the modules in the ramdisk,
-so recovery and fastbootd drive the panel themselves (§12).
-`kernel/drivers/misc/kompakt/kompakt_eink.c` is a tracing shim; no shipping
-image loads it.
+`meink`, `meink_loader`; `modules.load` is ignored on this
+device. The LineageOS recovery in our boot image carries its own copy of
+Mudita's modules in the ramdisk, so recovery and fastbootd always drive the
+panel with meink (§12).
 
 **How a frame reaches the panel.** Android composes into the framebuffer.
 mtkfb copies each frame, compares it with the previous one, and if it changed
@@ -80,12 +79,14 @@ Owned `system:system`. Values are text with a trailing newline.
 | `fps_limit` | meink's frame rate cap | a number; stock is 62 |
 | `kompakt_wf_gu16` | Quality (GL16) leaves unchanged pixels undriven | `0` or `1`; experiment, off by default |
 | `kompakt_wf_a2grey` | Fast (A2) with real grey levels, from the Quality table, at 4 bits | `0` or `1`; experiment, off by default |
-| `kompakt_wf_a2frames` | frames of the Fast (A2) recipe, in every temperature band | `0` (stock) or `2` to `6`; `kompakt_wf_a2short` is the alias for `5` |
+| `kompakt_wf_a2frames` | frames of the Fast (A2) recipe, in every temperature band | `0` (stock) or `2` to `9`; `2` to `7` shorten a band longer than that, `8` and `9` (Caster's default) only lengthen; `kompakt_wf_a2short` is the alias for `5` |
 | `kompakt_wf_gl16trim` | frames dropped from the end of the Quality (GL16) recipe | `0` (stock) or `1` to `24`, never below 4 frames left |
-| `kompakt_wf_dither` | dither pattern for Fast + dither and Auto's moving phase | `0` meink's Floyd-Steinberg, `1` Bayer 8x8, `2` Bayer 4x4 (coarser), `3` Atkinson diffusion over a Bayer threshold (ordered error diffusion); runs in the loader with meink's dithering off |
+| `kompakt_wf_dither` | dither pattern for Fast + dither and Auto while it moves | `0` meink's Floyd-Steinberg, `1` Bayer 8x8, `2` Bayer 4x4 (coarser; not offered in the app), `3` Atkinson diffusion over a Bayer threshold (ordered error diffusion), `4` blue noise (64x64 void and cluster, still like Bayer without its grid); runs in the loader with meink's dithering off, on the mode's tone curve (meink's 8-bit transfer at EinkImage `+0x300`), so greys match Normal |
 | `kompakt_wf_dither_cut` | the grey range the Bayer pattern covers | `lo hi` on 0 to 255, default `48 208`: at or below `lo` is black, at or above `hi` white, so near-white and text edges stay clean |
-| `kompakt_wf_du4` | 4-grey fast mode in the DU2 slot | `0` or `1`; then `waveform_mode DU2`. Balanced with Quality, about half its time |
+| `kompakt_wf_dither_light` | dither brightness for our patterns | `0` the mode's curve to `3`; a dithered pixel's grey t becomes t + L/3 · t(255 − t)/255, so dark greys keep detail; edges (text) keep the mode's curve. meink's Normal in Fast + dither is not changed |
+| `kompakt_wf_du4` | direct drive in the DU2 slot, every level straight to its target | `0` or `1`; experiment, off by default |
 | `kompakt_wf_dither_step` | Bayer spread of mode `3` | `0` (plain Atkinson) to `32` (full Bayer), default `8` |
+| `kompakt_wf_dither_edge` | edge cut for modes `1` to `4` | a toned grey at least this far from the pixel left, right, above or below is cut to black or white at 160, meink's own threshold, not patterned, so text and lines stay sharp; `1` to `255`, default `64`, `0` off |
 | `clear` | – | `0` or `1`: flash white or black, then repaint the current frame |
 | `power` | panel power | `1` on, `0` off |
 | `eink_temperature` | panel temperature, °C | a temperature offset (§10) |
@@ -132,11 +133,8 @@ device or per app. An app with no mode of its own gets **Fast + dither**.
 | Fast + dither | A2, 1 | 0.50, 12 | Floyd-Steinberg, 96 | no flash, greys as dots; the most detail at speed |
 | Text | GL16, 4 | 0.50, 12 | off | sharp greys for reading; slower |
 | Quality | GL16, 4 | 0.75, 10 | off | the cleanest picture; slowest |
-| Auto | `KAUTO` | as Quality | switched by the kernel | fast while moving, Quality once still (§9) |
 
-Every mode also writes `timings_mode clean` and brightness 100. Auto needs our
-vendor and boot images; elsewhere the app sees the kernel did not take `KAUTO`
-and applies Quality.
+Every mode also writes `timings_mode clean` and brightness 100.
 
 ## 6. `meink_hal` module parameters
 
@@ -250,6 +248,8 @@ inside meink when the first notifier runs is waited out (mtkfb holds
 
 ## 9. Auto mode
 
+The Kompakt app no longer offers Auto; the kernel still accepts `KAUTO`.
+
 Fast while the screen moves, quality once it settles. `meink_hal` already diffs
 every frame (§7), so it knows how much changed:
 
@@ -305,6 +305,23 @@ leave its AOD mode. Our kernel changes that path in four places:
   it on unblank, holding off the panel power-off meink would send during that
   call, then asks meink through `meink_loader` to wake and power the panel on.
 - **Power-down from AOD.** mtkfb takes meink out of AOD before suspending.
+- **Waking keeps the chosen mode.** meink sets A2 itself on every unblank,
+  bypassing `waveform_mode`. `meink_loader` keeps the waveform last written
+  there and sets it again from an fb notifier that runs after meink's
+  (`einkwake: unblank, back to …` in the kernel log).
+- **Locking goes straight to AOD.** The display driver reports DOZE only
+  with its LCM marked low power, and only the resume after a power-down
+  marked it. Kernel 0036 marks it when DOZE is requested while the display
+  is awake (`kompakt-aod: DOZE from an awake path, LCM low power`), and
+  SystemUI (frameworks_base 0139) takes over the screen off whenever AOD is
+  on, so there is no power-down and no sleep picture before the AOD.
+- **The AOD starts on a clean panel and runs in A2.** meink sets A2 on every
+  DOZE entry. Entering AOD over an awake screen, `meink_loader` first sets
+  GL16 with meink's skip-clear flag (render `+0x244`) down, so meink's own
+  GL16 to A2 switch clears black, white and redraws the newest frame
+  (`einkwake: AOD over an awake screen, meink clears it`). Minute ticks
+  re-enter DOZE over the AOD and are left alone, so clock and notification
+  updates draw in A2 whatever mode is chosen.
 - **Every AOD transition forces a full frame.** meink paints the AOD clock
   through the same write path, so `meink_hal`'s copy of the glass holds the
   clock afterwards. Without the reset, the first frame after a wake could be
@@ -358,9 +375,12 @@ shutdown for a flat battery shows the flat-battery picture instead.
 ## 14. Tried and reverted
 
 - A dirty-rectangle diff in mtkfb stopped AOD repainting; reverted.
-- Raising the SPI clock to 18.2 MHz stopped the panel refreshing; withdrawn
-  (`kernel/patches/withdrawn/`).
+- Raising the SPI clock to 18.2 MHz stopped the panel refreshing; withdrawn.
 - A whole-panel invert mode also inverted the lock screen and AOD, so it could
   not be per app; removed.
 - Free-form per-app dials could leave the panel black with no way back; replaced
   by the fixed modes in §5.
+- An open driver (`kompakt_eink.ko`, drawing in meink's place or checking it in
+  shadow mode), with its own Auto (touch start, DU2 entry) and a ghost cleanup
+  in the GC16 slot, ghosted more than meink in Fast; parked in 1.3, not
+  in this repo.

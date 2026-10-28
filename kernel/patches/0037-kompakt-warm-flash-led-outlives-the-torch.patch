@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gezim <gezimos@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 22:00:00 +0200
+Subject: [PATCH] kompakt: the warm flash LED outlives the torch
+
+The warm LED (channel 1) is switched from sysfs (flashlight_led1_onoff),
+which sets decouple mode; the white one (channel 2) is the camera HAL's
+torch. The HAL sets the coupled scenario, so its torch off took
+mt6370_operate's coupled branch and disabled both channels, and closing the
+device ran mt6370_uninit, which also disabled both. The warm LED went dark
+while flashlight_led1_onoff still read 1, so its tile showed it on. While the
+warm LED is held on from sysfs, the HAL's on/off runs decoupled and uninit
+disables channel 2 only.
+
+---
+diff --git a/drivers/misc/mediatek/flashlight/flashlights-mt6370.c b/drivers/misc/mediatek/flashlight/flashlights-mt6370.c
+--- a/drivers/misc/mediatek/flashlight/flashlights-mt6370.c
++++ b/drivers/misc/mediatek/flashlight/flashlights-mt6370.c
+@@ -142,6 +142,8 @@ static const unsigned char mt6370_strobe_level[MT6370_LEVEL_FLASH] = {
+ };
+ 
+ static int mt6370_decouple_mode;
++/* Kompakt: set by the warm LED's sysfs switch, defined with it below. */
++static int flashlight_led1_is_on;
+ static int mt6370_en_ch1;
+ static int mt6370_en_ch2;
+ static int mt6370_level_ch1 = 1;
+@@ -428,7 +430,8 @@ static int mt6370_uninit(void)
+ 	/* clear charger status */
+ 	is_decrease_voltage = 0;
+ 
+-	ret = mt6370_disable(MT6370_CHANNEL_ALL);
++	/* Kompakt: the warm LED held on from sysfs outlives the camera HAL's torch. */
++	ret = mt6370_disable(flashlight_led1_is_on ? MT6370_CHANNEL_CH2 : MT6370_CHANNEL_ALL);
+ 
+ 	return ret;
+ }
+@@ -611,6 +614,9 @@ static int mt6370_ioctl(unsigned int cmd, unsigned long arg)
+ 	case FLASH_IOC_SET_ONOFF:
+ 		pr_debug("FLASH_IOC_SET_ONOFF(%d): %d\n",
+ 				channel, (int)fl_arg->arg);
++		/* Kompakt: switch only the white LED while the warm one is held on from sysfs. */
++		if (flashlight_led1_is_on)
++			mt6370_decouple_mode = FLASHLIGHT_SCENARIO_DECOUPLE;
+ 		mt6370_operate(MT6370_CHANNEL_CH2, fl_arg->arg);
+ 		break;
+ 
+-- 
+2.43.0

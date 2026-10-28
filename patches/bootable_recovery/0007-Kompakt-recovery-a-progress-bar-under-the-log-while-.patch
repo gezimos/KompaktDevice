@@ -1,5 +1,5 @@
 From 7058f368252b5780752c9b22b0ef48540d5b52ae Mon Sep 17 00:00:00 2001
-From: gezimos <>
+From: Gezim <gezimos@users.noreply.github.com>
 Date: Sat, 26 Sep 2026 22:13:49 +0200
 Subject: [PATCH] Kompakt: recovery: a progress bar under the log while
  installing
