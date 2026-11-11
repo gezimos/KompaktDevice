@@ -160,6 +160,50 @@ which the platform policy already lets read and write `sysfs_leds`.
   trigger (our kernels since 0020) or, on Mudita's kernel, to a solid light
   at one level. Ship this vendor with a boot image that has 0027.
 
+### The app freezer
+
+Android freezes a cached app through the task profiles `Frozen` and
+`Unfrozen`, which set the attribute `FreezerState`: `cgroup.freeze` in the
+cgroup v2 tree, as `/system/etc/task_profiles.json` defines it. libprocessgroup
+loads the vendor file after the system one and a vendor definition replaces
+the system one of the same name.
+
+- Mudita's `etc/task_profiles.json` defines all three again for a cgroup v1
+  freezer (`frozen/freezer.state`, `JoinCgroup frozen`) that no `cgroups.json`
+  on the phone mounts. `system_server`'s support probe
+  (`com_android_server_am_Freezer.cpp`) resolved `FreezerState` to a file that
+  does not exist and logged `Freezer disabled` at every boot.
+- `apply-freezer-profiles.sh` removes the three overrides (`FREEZER_PROFILES_OK`).
+  MediaTek's own `FreezerFrozen` and `FreezerThawed` profiles stay; nothing in
+  vendor uses them.
+- The probe also needs the binder half: kernel patch 0040 (boot 279).
+
+### The modem with Offline+ engaged
+
+Booted with the switch on, the modem fails its radio self-check inside its own
+start-up (`mml1_rf_error_check.c`, between its `+EIND: 64` and `+EIND: 128`
+marks, before the mux has sent it anything): the switch takes the RF path away
+in hardware. `ccci_mdinit` then resets it every 14 s, `gsm0710muxd` never sets
+`vendor.ril.mtk=1`, the RIL daemon never starts, and `com.android.phone` waits
+for the radio HAL until Android kills it at its start-up timeout and starts it
+again, for as long as the switch stays on. A flip while the modem is running is
+harmless: the radio goes off (`AT+EFUN=0`) and the modem keeps running.
+
+- `apply-offline-modem-gate.sh` (`OFFLINE_MODEM_GATE_OK`) makes `ccci_mdinit`
+  a `disabled` service and adds `etc/init/kompakt-modem.rc`: at `on boot`,
+  init runs `etc/kompakt-modem-gate.sh` (domain `kompakt_modem_gate`), which
+  reads the switch from `sysfs_irqkey` and sets `vendor.kompakt.modem` to 1
+  when it is off; `on property:vendor.kompakt.modem=1` starts `ccci_mdinit`.
+  Off at boot, the modem starts a few ms later than it did; on, it is not
+  started.
+- KompaktService sets the property on every flip (`OfflineWatcherService`),
+  so the modem boots the moment the switch is released. `vendor.kompakt.` is a
+  public vendor property (`vendor_kompakt_prop`), which is what lets a
+  `system_app` set it.
+- A switch node that cannot be read counts as off: the modem starts.
+- The phone process half is KompaktOS telephony patch 0006, which stops it
+  waiting for the HAL; this vendor only stops the modem from thrashing.
+
 ## 6. Fingerprint navigation
 
 Chipone's fingerprint HAL (`lib64/hw/fpsensor_fingerprint.default.so`) has a
@@ -216,10 +260,12 @@ WORK=<dir> LINEAGE=<tree> SYSTEM_IMG=<system.img> \
 It installs our `meink.ko` pictures (checking that only picture bytes differ
 from stock), our `meink_hal.ko` and `meink_loader.ko` (`apply-open-eink.sh ... off`), the e-ink access, the Wi-Fi calling access
 (`apply-wifi-calling-access.sh`: `ipsec_mon` may read the privileged route
-details Android 16 guards, or the tunnel sends nothing), the fingerprint HAL and ini,
+details Android 16 guards, or the tunnel sends nothing), the modem gate
+(`apply-offline-modem-gate.sh`, `OFFLINE_MODEM_GATE_OK`), the fingerprint HAL and ini,
 `apply-usb-no-mass-storage.sh` (`USB_ADB_ACM ...`), the lights HAL
 (`apply-lights-hal.sh`, `LIGHTS_HAL_OK`), the power hints
-(`apply-power-hints.sh`, `POWER_TOUCH_FLOOR=1`) and
+(`apply-power-hints.sh`, `POWER_TOUCH_FLOOR=1`), the freezer profiles
+(`apply-freezer-profiles.sh`, `FREEZER_PROFILES_OK`) and
 `stamp-build-number.sh` (`STAMPED ...`). It checks labels after each edit,
 compiles the policy together with `SYSTEM_IMG`'s the way init does
 (`check-vendor-policy.sh`) and stops if it fails, makes the image, and reads

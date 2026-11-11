@@ -1,0 +1,196 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gezim <gezimos@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 21:30:00 +0100
+Subject: [PATCH] kompakt: a rejected upload gives the buffer mutex back
+
+meink's uploadImageToDisplay takes the display's buffer mutex and
+releases it on its success path only: when the first SPI write of an
+upload fails it returns -1 with the mutex held. The next upload blocks on
+it under the display mutex, and an AOD switch (eink_always_on_display,
+MeinkSleep, EinkDisplayClose) blocks on the display mutex behind that.
+With the always-on display entered over an awake screen (0036), a wake a
+second after locking met an upload in flight and the screen froze on the
+AOD until a forced restart (build 424; both threads in D state in
+chip_os_mutex_take).
+
+The loader's copy of the display vtable, so far installed only for the
+waveform logger, is now installed at probe and wraps writeImage and
+writePartialImage: when the upload returns an error and the buffer mutex
+is still held, EinkBufferingReleaseCurrentBuffer gives it back, under the
+display mutex, where no other taker of it can be running. The logger
+slot is toggled inside the copy, and the stock vtable goes back before
+EinkDeinit.
+---
+diff --git a/drivers/misc/mudita/eink_loader/loader.c b/drivers/misc/mudita/eink_loader/loader.c
+--- a/drivers/misc/mudita/eink_loader/loader.c
++++ b/drivers/misc/mudita/eink_loader/loader.c
+@@ -1145,11 +1145,15 @@
+ #define WF_A2_SHORT_N     5
+ #define WF_VT_BYTES       0xd0            /* einkEd043wc5Fn */
+ #define WF_VT_SETWF       (0x58 / sizeof(void *))
++#define WF_VT_WRITE       (0x38 / sizeof(void *))   /* einkEd043wc5_writeImage */
++#define WF_VT_WRITEPART   (0x40 / sizeof(void *))   /* einkEd043wc5_writePartialImage */
+ #define WF_DISP_VT        0x08
+ #define WF_DISP_API_MUTEX 0x10
+ #define WF_DISP_WAVEFORM  0x90
+ #define WF_DISP_BPP       0xa8            /* meink sets it from the waveform; pixelbits writes are a no-op */
+ #define WF_MEINK_OPEN     0x4c
++#define WF_DISP_BUFFERING 0xc0            /* the display's EinkBuffering */
++#define WF_BUF_MUTEX      0x30            /* its mutex, taken for every upload */
+ 
+ #define WF_GU16           0x1
+ #define WF_A2GREY         0x2
+@@ -1382,6 +1386,9 @@
+ static void *wf_vt_stock;                       /* einkEd043wc5Fn */
+ static void *wf_vt_copy[WF_VT_BYTES / sizeof(void *)];
+ static int (*wf_vt_orig)(void *display, int type);
++static int (*wf_vt_write_orig)(void *display, void *image);
++static int (*wf_vt_writepart_orig)(void *display, void *image, unsigned long a, unsigned long b);
++static int (*wf_buf_release)(void *buffering);
+ static int (*wf_lock_session)(void *display);
+ static int (*wf_unlock_session)(void *display);
+ static int (*wf_get_waveform)(void *display);
+@@ -1460,28 +1467,84 @@
+     return -ENODEV;
+ }
+ 
+-/* Install or remove the upload logger; display mutex held. */
++/*
++ * Kompakt: meink's uploadImageToDisplay returns from a failed first SPI write with
++ * the buffer mutex still held (its release sits on the success path alone). The next
++ * upload then blocks on it under the display mutex, and an AOD switch behind that:
++ * the screen froze on the AOD after a wake right after locking (build 424). Give the
++ * mutex back here, still under the display mutex, where no other taker of it runs.
++ */
++static void wf_upload_repair(void *display, int ret)
++{
++    void *buffering = *(void **)((u8 *)display + WF_DISP_BUFFERING);
++    struct mutex *m = buffering ? (struct mutex *)((u8 *)buffering + WF_BUF_MUTEX) : NULL;
++
++    if (ret == 0 || !m || !mutex_is_locked(m))
++        return;
++    wf_buf_release(buffering);
++    pr_warn("kompakt-eink: upload rejected (%d), buffer mutex given back\n", ret);
++}
++
++static int wf_write_image_hook(void *display, void *image)
++{
++    int ret = wf_vt_write_orig(display, image);
++
++    wf_upload_repair(display, ret);
++    return ret;
++}
++
++static int wf_write_part_hook(void *display, void *image, unsigned long a, unsigned long b)
++{
++    int ret = wf_vt_writepart_orig(display, image, a, b);
++
++    wf_upload_repair(display, ret);
++    return ret;
++}
++
++/* The vtable and the entries the copy replaces; the loader pins meink, so they stay valid. */
++static int wf_vt_attach(struct module *mod)
++{
++    wf_vt_stock = (void *)meink_symbol(mod, "einkEd043wc5Fn", WF_VT_BYTES);
++    wf_vt_orig = (void *)meink_symbol(mod, "einkEd043wc5_setWaveformType", 4);
++    wf_vt_write_orig = (void *)meink_symbol(mod, "einkEd043wc5_writeImage", 4);
++    wf_vt_writepart_orig = (void *)meink_symbol(mod, "einkEd043wc5_writePartialImage", 4);
++    wf_buf_release = (void *)meink_symbol(mod, "EinkBufferingReleaseCurrentBuffer", 4);
++    return wf_vt_stock && wf_vt_orig && wf_vt_write_orig && wf_vt_writepart_orig &&
++           wf_buf_release ? 0 : -ENODEV;
++}
++
++/* The vtable copy: the upload repair always, the waveform logger while on; display mutex held. */
+ static int wf_hook(u8 *display, int on)
+ {
+     void **vt = (void **)(display + WF_DISP_VT);
+ 
+-    if (!on) {
+-        if (READ_ONCE(*vt) == wf_vt_copy)
+-            WRITE_ONCE(*vt, wf_vt_stock);
+-        return 0;
+-    }
+-    if (READ_ONCE(*vt) == wf_vt_copy)
+-        return 0;
+-    if (READ_ONCE(*vt) != wf_vt_stock)
+-        return -EINVAL;
+-    memcpy(wf_vt_copy, wf_vt_stock, WF_VT_BYTES);
+-    if (wf_vt_copy[WF_VT_SETWF] != (void *)wf_vt_orig)
++    if (!wf_vt_stock)
++        return -ENODEV;
++    if (READ_ONCE(*vt) == wf_vt_stock) {
++        memcpy(wf_vt_copy, wf_vt_stock, WF_VT_BYTES);
++        if (wf_vt_copy[WF_VT_SETWF] != (void *)wf_vt_orig ||
++            wf_vt_copy[WF_VT_WRITE] != (void *)wf_vt_write_orig ||
++            wf_vt_copy[WF_VT_WRITEPART] != (void *)wf_vt_writepart_orig)
++            return -EINVAL;
++        wf_vt_copy[WF_VT_WRITE] = (void *)wf_write_image_hook;
++        wf_vt_copy[WF_VT_WRITEPART] = (void *)wf_write_part_hook;
++        WRITE_ONCE(*vt, wf_vt_copy);
++    } else if (READ_ONCE(*vt) != wf_vt_copy) {
+         return -EINVAL;
+-    wf_vt_copy[WF_VT_SETWF] = (void *)wf_set_waveform_hook;
+-    WRITE_ONCE(*vt, wf_vt_copy);
++    }
++    WRITE_ONCE(wf_vt_copy[WF_VT_SETWF], on ? (void *)wf_set_waveform_hook : (void *)wf_vt_orig);
+     return 0;
+ }
+ 
++/* Before EinkDeinit: meink's own vtable back; display mutex held. */
++static void wf_unhook(u8 *display)
++{
++    void **vt = (void **)(display + WF_DISP_VT);
++
++    if (READ_ONCE(*vt) == wf_vt_copy)
++        WRITE_ONCE(*vt, wf_vt_stock);
++}
++
+ /* Rewrite every record that differs from what flags ask for; display mutex held. */
+ static int wf_write(u8 *work, unsigned int flags, unsigned int *changed)
+ {
+@@ -1560,6 +1623,9 @@
+ /* Before EinkDeinit: give meink its stock table and vtable back. */
+ static void wf_exit(void)
+ {
++    u8 *meink = g_einkData.einkDrv;
++    u8 *display = meink ? *(u8 **)meink : NULL;
++
+     mutex_lock(&wf_mutex);
+     if (wf_live && wf_apply(0) == 0) {
+         vfree(wf_stock);
+@@ -1568,6 +1634,11 @@
+         module_put(wf_owner);
+     }
+     wf_flags = 0;
++    if (display) {
++        mutex_lock((struct mutex *)(display + WF_DISP_API_MUTEX));
++        wf_unhook(display);
++        mutex_unlock((struct mutex *)(display + WF_DISP_API_MUTEX));
++    }
+     mutex_unlock(&wf_mutex);
+ }
+ 
+@@ -2096,6 +2167,20 @@
+     } else {
+         pr_err("einkwake: eink_always_on_display not found, AOD stays on A2\n");
+     }
++    /* The display vtable copy with the upload repair, before the first frame. */
++    if (g_einkData.einkDrv && wf_vt_attach(mod) == 0) {
++        u8 *display = *(u8 **)g_einkData.einkDrv;
++        struct mutex *api = (struct mutex *)(display + WF_DISP_API_MUTEX);
++        int err;
++
++        mutex_lock(api);
++        err = wf_hook(display, 0);
++        mutex_unlock(api);
++        if (err)
++            pr_err("kompakt-eink: display vtable not as expected (%d), upload repair off\n", err);
++    } else {
++        pr_err("kompakt-eink: meink symbols not found, upload repair off\n");
++    }
+ }
+ 
+ static void kompakt_hold_exit(void)
+-- 
+2.43.0

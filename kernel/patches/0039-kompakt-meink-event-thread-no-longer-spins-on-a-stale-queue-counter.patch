@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gezim <gezimos@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 13:30:00 +0200
+Subject: [PATCH] kompakt: meink's event thread no longer spins on a stale queue counter
+
+meink's [meink]event consumer thread takes its work from a queue that has no
+lock, and decides there is work from the queue's counter before it pops the
+list. The loader pushes events into that queue from the display driver at the
+unblank and at the AOD entry (0035), which on an AOD entry from an awake
+screen (0036) overlap the thread's own pops. A race leaves the counter above
+the real length of the list. The pop then fails on the empty list, nothing
+counts the counter down, and the thread loops without ever sleeping, a full
+core in AOD and awake alike, until the next boot.
+
+The loader now changes the one instruction that reads the counter, at
+event_consumer_thrd+0x64, to read the list head, which is what the pop reads.
+A stale counter then costs nothing. It checks the three instructions around
+the change first and does nothing if any of them differs.
+
+---
+--- a/drivers/misc/mudita/eink_loader/loader.c
++++ b/drivers/misc/mudita/eink_loader/loader.c
+@@ -24,6 +24,7 @@
+ #include <linux/vmalloc.h>
+ #include <linux/reboot.h>
+ #include <linux/crc32.h>
++#include <asm/cacheflush.h>
+ 
+ MODULE_DESCRIPTION("E-Ink driver loader");
+ MODULE_LICENSE("GPL");
+@@ -1921,6 +1922,7 @@
+ /* Kompakt: the sleep screen hold, defined below with the rest of it. */
+ static void kompakt_hold_init(void);
+ static void kompakt_hold_exit(void);
++static void kompakt_queue_guard(void);
+ static struct notifier_block kompakt_reboot_nb;
+ 
+ static int eink_spi_probe(struct spi_device *spi)
+@@ -1941,6 +1943,7 @@
+     /* meink has just registered its frame hook inside EinkInit; wrap it now. */
+     kompakt_bayer_thresholds();
+     kompakt_hold_init();
++    kompakt_queue_guard();
+     register_reboot_notifier(&kompakt_reboot_nb);
+ 
+     g_einkData.eink_dbg_kobj = kobject_create_and_add("einkinfo", NULL);
+@@ -2141,8 +2144,77 @@
+         pr_info("einkwake: AOD over an awake screen, meink clears it\n");
+     }
+     return meink_aod(on);
++}
++
++/*
++ * meink's event consumer thread takes work from a queue with no lock, and decides
++ * there is work from the queue's counter. A push from the display driver can race
++ * the pop and leave the counter above the list; the pop then fails, nothing counts
++ * it down and the thread spins at 100% of a core. Test the list head, which is what
++ * the pop reads, instead of the counter.
++ */
++#define QG_SYMBOL       "event_consumer_thrd"
++#define QG_QUEUE        0x60            /* ldr x8, [x19, #0x58]: the queue */
++#define QG_LOAD         0x64            /* the instruction changed */
++#define QG_TEST         0x68            /* cbnz x8: work if not zero */
++#define QG_QUEUE_OP     0xf9402e68u
++#define QG_COUNTER_OP   0xf9400908u     /* ldr x8, [x8, #0x10]: the counter */
++#define QG_HEAD_OP      0xf9400108u     /* ldr x8, [x8]: the list head */
++#define QG_TEST_OP      0xb50000a8u
++
++/* One aligned word into module text through a writable alias, then the instruction cache. */
++static int kompakt_text_poke32(u32 *dst, u32 val)
++{
++    unsigned long base = (unsigned long)dst & PAGE_MASK;
++    struct page *page = vmalloc_to_page((void *)base);
++    u8 *map;
++    u32 *alias;
++    int ret = 0;
++
++    if (!page)
++        return -EFAULT;
++    map = vmap(&page, 1, VM_MAP, PAGE_KERNEL);
++    if (!map)
++        return -ENOMEM;
++    alias = (u32 *)(map + ((unsigned long)dst - base));
++    if (READ_ONCE(*alias) != READ_ONCE(*dst))
++        ret = -EFAULT;
++    else
++        WRITE_ONCE(*alias, val);
++    vunmap(map);
++    if (!ret)
++        flush_icache_range((unsigned long)dst, (unsigned long)dst + sizeof(*dst));
++    return ret;
+ }
+ 
++static void kompakt_queue_guard(void)
++{
++    struct module *mod = meink_get();
++    u32 *fn;
++    int err;
++
++    if (!mod) {
++        pr_err("kompakt-eink: meink not found, event queue guard off\n");
++        return;
++    }
++    fn = (u32 *)meink_symbol(mod, QG_SYMBOL, QG_TEST + sizeof(u32));
++    if (!fn || READ_ONCE(fn[QG_QUEUE / 4]) != QG_QUEUE_OP ||
++        READ_ONCE(fn[QG_TEST / 4]) != QG_TEST_OP) {
++        pr_err("kompakt-eink: event consumer not as expected, queue guard off\n");
++    } else if (READ_ONCE(fn[QG_LOAD / 4]) == QG_HEAD_OP) {
++        pr_info("kompakt-eink: event queue guard already on\n");
++    } else if (READ_ONCE(fn[QG_LOAD / 4]) != QG_COUNTER_OP) {
++        pr_err("kompakt-eink: event consumer not as expected, queue guard off\n");
++    } else {
++        err = kompakt_text_poke32(&fn[QG_LOAD / 4], QG_HEAD_OP);
++        if (err)
++            pr_err("kompakt-eink: event queue guard failed (%d)\n", err);
++        else
++            pr_info("kompakt-eink: event queue guard on\n");
++    }
++    module_put(mod);
++}
++
+ static void kompakt_hold_init(void)
+ {
+     struct module *mod = meink_get();
+-- 
+2.43.0

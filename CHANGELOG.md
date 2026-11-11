@@ -6,7 +6,39 @@ image is also released here on its own.
 
 ## 1.3 (unreleased)
 
-Boot 277, vendor 319.
+Boot 281, vendor 323.
+
+### Front light
+
+- **Dim light has steps.** Android sends the front light 255 levels, and the
+  kernel mapped them to the PWM in steps of 4 of 1023, so the bottom few
+  percent the light runs at on e-ink had five levels, each a visible jump. The
+  map is now a square law over a 4096-step PWM period at the same PWM
+  frequency: the same light at the top, sixteen times the steps at the dim
+  end, so the automatic brightness can fade a change of room through steps
+  too small to see. Needs KompaktOS 1.3 for the fade and the curve.
+  `kernel/patches/0041`, `0042`.
+
+### Offline+
+
+- **Started with Offline+ on, the modem no longer resets every 14 seconds.**
+  With the switch engaged the modem fails its radio self-check as it boots, and
+  MediaTek's init daemon restarted it without end, with the phone process dying
+  and restarting alongside, for as long as the switch stayed on. The modem is
+  now only started once the switch is off, at boot or when you flip it, and
+  comes up within seconds of the flip. Needs KompaktOS 1.3 for the phone
+  process half. `vendor/scripts/apply-offline-modem-gate.sh`.
+
+### Memory
+
+- **Apps you leave are frozen, and their memory compressed.** Android freezes
+  an app a few seconds after you leave it, so it uses no processor until you
+  come back, and compresses its memory into zram instead of keeping it whole
+  until it has to be closed. Two things kept it off at every boot ("Freezer
+  disabled"): the kernel lacked the binder half of it, and Mudita's vendor
+  pointed Android's freezer profile at a cgroup v1 file this phone does not
+  have. Needs KompaktOS 1.3 for the compression. `kernel/patches/0040`,
+  `vendor/scripts/apply-freezer-profiles.sh`.
 
 ### Flashlight
 
@@ -19,6 +51,12 @@ Boot 277, vendor 319.
 meink draws, as in 1.2; these add to the tables and dithers it uses
 (`kernel/patches/0035`).
 
+- **No frozen screen after a wake right after locking.** With the always-on
+  display coming straight from an awake screen, a wake within a second or two
+  could meet a frame still being uploaded; a failed SPI write inside meink then
+  left its buffer lock held, the next upload waited on it forever, and the wake
+  behind that. The screen kept the clock until a forced restart. The loader
+  now gives the lock back when an upload is rejected. `kernel/patches/0038`.
 - **No ghost of the previous screen after a slide-in.** A partial refresh
   could leave one changed area out (two separated areas, the first in two
   parts, such as the app drawer sliding over the home screen); that area kept

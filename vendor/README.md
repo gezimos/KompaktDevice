@@ -36,11 +36,15 @@ lib/modules/meink_hal.ko, meink_loader.ko   ours, GPL, built from kernel/patches
 lib/modules/meink.ko                        Mudita's, with our pictures (apply-boot-logo.sh)
 lib64/hw/fpsensor_fingerprint.default.so    navigation on (tools/patch-fp-navigator.py)
 etc/fpsensor_nav.ini                        its settings (apply-fp-navigator.sh)
-etc/selinux/vendor_sepolicy.cil             e-ink and battery nodes reachable (apply-eink-access.sh, apply-battery-access.sh)
+etc/selinux/vendor_sepolicy.cil             e-ink and battery nodes reachable (apply-eink-access.sh, apply-battery-access.sh); the modem gate's domain and property (apply-offline-modem-gate.sh)
+etc/selinux/vendor_property_contexts        vendor.kompakt. (apply-offline-modem-gate.sh)
+etc/init/init.cccimdinit.rc                 ccci_mdinit disabled, started by the property (apply-offline-modem-gate.sh)
+etc/init/kompakt-modem.rc, etc/kompakt-modem-gate.sh   the modem started once Offline+ is off (apply-offline-modem-gate.sh)
 etc/selinux/plat_pub_versioned.cil          Mudita's orphaned vendor types bound (fix-orphaned-vendor-types.sh)
 etc/init/hw/init.project.rc                 the matching permissions; the LED nodes to system (apply-lights-hal.sh)
 bin/hw/android.hardware.lights-service.mediatek   LineageOS's lights HAL under MediaTek's name (apply-lights-hal.sh)
 etc/init/hw/init.mt6761.usb.rc              no mass storage with adb + serial (apply-usb-no-mass-storage.sh)
+etc/task_profiles.json                      Android's freezer profiles no longer overridden (apply-freezer-profiles.sh)
 build.prop                                  ro.vendor.mtk_aod_support=1 and the build number (stamp-build-number.sh)
 ```
 

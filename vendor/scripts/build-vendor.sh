@@ -8,7 +8,7 @@
 #   vstage2/                    the labelled stage (STAGE= to use another)
 #   vendorx/                    the stock vendor, extracted, for comparison
 #   meink_hal-0035.ko           our meink_hal build (kernel patches 0020, 0035)
-#   meink_loader-0035.ko        our meink_loader build (kernel patches 0020, 0035)
+#   meink_loader-0035.ko        our meink_loader build (kernel patches 0020, 0035, 0038)
 #   meink-kompakt-pictures.ko   meink.ko with our pictures (apply-boot-logo.sh)
 # SYSTEM_IMG is the system image this vendor ships with; its policy is compiled
 # together with the vendor's.
@@ -39,6 +39,7 @@ grep -qa "kompakt-poweroff" $KO || { echo GATE_LOADER_NO_POWEROFF_HOOK; exit 1; 
 grep -qa "acquire_screen_buffer" $KO || { echo GATE_LOADER_NO_DRAIN; exit 1; }
 grep -qa "vermagic=4.19.191-00095-g83b1ab1a9a4b-dirty" $KO || { echo GATE_VERMAGIC; exit 1; }
 grep -qa "4 blue noise" $KO || { echo GATE_LOADER_NOT_0035; exit 1; }
+grep -qa "buffer mutex given back" $KO || { echo GATE_LOADER_NOT_0038; exit 1; }
 grep -qa "no box budget left" $HAL || { echo GATE_HAL_NOT_0035; exit 1; }
 # gate: the lights HAL is built
 test -f $LIGHTS || { echo GATE_LIGHTS_HAL_NOT_BUILT; exit 1; }
@@ -55,10 +56,12 @@ python3 -c "import os;os.setxattr('$V/lib/modules/meink.ko', b'security.selinux'
 bash $HERE/vendor/scripts/apply-open-eink.sh $V $W off
 bash $HERE/vendor/scripts/apply-eink-access.sh $V
 bash $HERE/vendor/scripts/apply-wifi-calling-access.sh $V
+bash $HERE/vendor/scripts/apply-offline-modem-gate.sh $V
 python3 - <<'PY'
 import os, sys
 V = os.environ['V']
-for p in ('lib/modules/meink_hal.ko', 'lib/modules/meink_loader.ko', 'lib/modules/modules.dep', 'etc/selinux/vendor_sepolicy.cil', 'etc/init/hw/init.project.rc'):
+for p in ('lib/modules/meink_hal.ko', 'lib/modules/meink_loader.ko', 'lib/modules/modules.dep', 'etc/selinux/vendor_sepolicy.cil', 'etc/init/hw/init.project.rc',
+          'etc/init/init.cccimdinit.rc', 'etc/init/kompakt-modem.rc', 'etc/kompakt-modem-gate.sh', 'etc/selinux/vendor_property_contexts'):
     label = os.getxattr(os.path.join(V, p), 'security.selinux')
     print('LABEL', p, label)
     if not label.startswith(b'u:object_r:vendor_'):
@@ -75,11 +78,12 @@ bash $HERE/vendor/scripts/apply-volume-curves.sh $V
 bash $HERE/vendor/scripts/apply-speech-volume.sh $V
 bash $HERE/vendor/scripts/apply-lights-hal.sh $V $LIGHTS
 bash $HERE/vendor/scripts/apply-power-hints.sh $V
+bash $HERE/vendor/scripts/apply-freezer-profiles.sh $V
 bash $HERE/vendor/scripts/stamp-build-number.sh $V $BN
 python3 - <<'PY'
 import os, sys
 V = os.environ['V']
-for p in ('lib64/hw/fpsensor_fingerprint.default.so', 'etc/fpsensor_nav.ini', 'etc/init/hw/init.mt6761.usb.rc', 'etc/audio_policy_volumes.xml', 'etc/audio_param/SpeechVol_AudioParam.xml', 'etc/init/hw/init.project.rc', 'build.prop'):
+for p in ('lib64/hw/fpsensor_fingerprint.default.so', 'etc/fpsensor_nav.ini', 'etc/init/hw/init.mt6761.usb.rc', 'etc/audio_policy_volumes.xml', 'etc/audio_param/SpeechVol_AudioParam.xml', 'etc/init/hw/init.project.rc', 'etc/task_profiles.json', 'build.prop'):
     label = os.getxattr(os.path.join(V, p), 'security.selinux')
     print('LABEL', p, label)
     if not label.startswith(b'u:object_r:vendor_'):
@@ -118,5 +122,11 @@ echo "IMAGE_SPEECH_LEVELS=$(debugfs -R "cat /etc/audio_param/SpeechVol_AudioPara
 echo "IMAGE_LIGHTS_HAL_MATCH=$([ "$(debugfs -R "cat /bin/hw/android.hardware.lights-service.mediatek" $IMG 2>/dev/null | md5sum | cut -d' ' -f1)" = "$(md5sum < $LIGHTS | cut -d' ' -f1)" ] && echo yes || echo NO)"
 echo "IMAGE_LIGHTS_HAL_LABEL=$(debugfs -R "ea_get /bin/hw/android.hardware.lights-service.mediatek security.selinux" $IMG 2>/dev/null | tr -d '\0\n')"
 echo "IMAGE_LED_CHOWNS=$(debugfs -R "cat /etc/init/hw/init.project.rc" $IMG 2>/dev/null | grep -cE '^    chown system system /sys/class/leds/(red|green|blue)/')"
+echo "IMAGE_FREEZER_OVERRIDES=$(debugfs -R "cat /etc/task_profiles.json" $IMG 2>/dev/null | grep -cE '^      "Name": "(FreezerState|Frozen|Unfrozen)"')"
+echo "IMAGE_CCCI_MDINIT_DISABLED=$(debugfs -R "cat /etc/init/init.cccimdinit.rc" $IMG 2>/dev/null | grep -c 'Kompakt: started by kompakt-modem.rc')"
+echo "IMAGE_MODEM_GATE_RC=$(debugfs -R "cat /etc/init/kompakt-modem.rc" $IMG 2>/dev/null | grep -c '^    start ccci_mdinit$')"
+echo "IMAGE_MODEM_GATE_DOMAIN=$(debugfs -R "cat /etc/selinux/vendor_sepolicy.cil" $IMG 2>/dev/null | grep -cx '(type kompakt_modem_gate)')"
+echo "IMAGE_MODEM_GATE_PROP=$(debugfs -R "cat /etc/selinux/vendor_property_contexts" $IMG 2>/dev/null | grep -cE '^vendor\.kompakt\. ')"
+echo "IMAGE_MODEM_GATE_SH_LABEL=$(debugfs -R "ea_get /etc/kompakt-modem-gate.sh security.selinux" $IMG 2>/dev/null | tr -d '\0\n')"
 echo "VENDOR_MD5=$(md5sum $IMG | cut -d' ' -f1)"
 echo VENDOR_DONE

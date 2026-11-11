@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gezim <gezimos@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 14:00:00 +0200
+Subject: [PATCH] kompakt: the front light's PWM by a square law, so dim light has steps
+
+Android sends the front light 255 steps. Stock mapped them linearly to 127
+duties (CONFIG_LIGHTNESS_MAPPING_VALUE) and those to the 10-bit PWM in steps
+of 4, capped at half the range. A front light on e-ink lives in the bottom
+few percent of that: the 2 to 4 percent people run it at were duties 2 to 5,
+five distinct levels, each 25 to 100 percent more light than the one before,
+so every change of room the auto curve followed was a visible jump, however
+slowly the framework ramped.
+
+The front light (led_mode 5, BLS PWM) now takes its PWM straight from the
+level by a square law, 510 * (level / 255)^2 of 1023, never below 1 while
+on. The top is stock's 510; below the old fifth step there are now twenty
+distinct duties, and the automatic ramp has something to walk. The other LED
+modes keep the stock mapping. A one-time kernel line names the map, and the
+backlight_debug_log line's "map:" is now the PWM duty, 0 to 510.
+
+The Kompakt app's curve (LightCurve.kt) and the overlay curve carry their
+levels in these steps; the app rewrites a curve saved in the old steps once
+at boot.
+---
+ drivers/misc/mediatek/leds/mt6765/mtk_leds.c | 54 +++++++++++++++-------
+ 1 file changed, 37 insertions(+), 17 deletions(-)
+
+--- a/drivers/misc/mediatek/leds/mt6765/mtk_leds.c
++++ b/drivers/misc/mediatek/leds/mt6765/mtk_leds.c
+@@ -674,6 +674,20 @@
+ 	mutex_unlock(&leds_mutex);
+ }
+ 
++/*
++ * Kompakt: the front light's PWM duty, 0 to 510 of 1023, from Android's level, 0 to 255, by a
++ * square law. Stock mapped the level linearly to 127 duties and those to the PWM in steps of 4,
++ * so the bottom five percent of light, all a front light on e-ink needs, had five steps and every
++ * change of room was a visible jump. The square law keeps stock's top (half the PWM range) and
++ * spends the steps where the eye is: twenty distinct duties below the old fifth step.
++ */
++static int kompakt_frontlight_pwm(int level)
++{
++	if (level <= 0)
++		return 0;
++	return max(1, (level * level * 510 + 32512) / 65025);
++}
++
+ void mt_mt65xx_led_set(struct led_classdev *led_cdev, enum led_brightness level)
+ {
+ 	struct mt65xx_led_data *led_data =
+@@ -722,25 +736,35 @@
+ 				   led_data->level, jiffies);
+ 			schedule_work(&led_data->work);
+ 		} else {
+-			if (level != 0
+-			    && level * CONFIG_LIGHTNESS_MAPPING_VALUE < 255) {
+-				level = 1;
++			/* Kompakt: the front light takes its PWM straight from the level (kompakt_frontlight_pwm). */
++			if (led_data->cust.mode == MT65XX_LED_MODE_CUST_BLS_PWM) {
++				level = kompakt_frontlight_pwm(level);
++				pr_info_once("kompakt-frontlight: square-law PWM map, %d of 1023 at full\n",
++					     kompakt_frontlight_pwm(255));
++				backlight_debug_log(led_data->level, level);
++				disp_pq_notify_backlight_changed(level);
++				mt_mt65xx_led_set_cust(&led_data->cust, level);
+ 			} else {
+-				level =
+-				    (level * CONFIG_LIGHTNESS_MAPPING_VALUE) /
+-				    255;
++				if (level != 0
++				    && level * CONFIG_LIGHTNESS_MAPPING_VALUE < 255) {
++					level = 1;
++				} else {
++					level =
++					    (level * CONFIG_LIGHTNESS_MAPPING_VALUE) /
++					    255;
++				}
++				backlight_debug_log(led_data->level, level);
++				disp_pq_notify_backlight_changed((((1 <<
++						MT_LED_INTERNAL_LEVEL_BIT_CNT)
++							- 1) * level +
++							127) / 255);
++				if (led_data->cust.mode == MT65XX_LED_MODE_CUST_BLS_PWM)
++					mt_mt65xx_led_set_cust(&led_data->cust,
++						((((1 << MT_LED_INTERNAL_LEVEL_BIT_CNT)
++							- 1) * level + 127) / 255));
++				else
++					mt_mt65xx_led_set_cust(&led_data->cust, level);
+ 			}
+-			backlight_debug_log(led_data->level, level);
+-			disp_pq_notify_backlight_changed((((1 <<
+-					MT_LED_INTERNAL_LEVEL_BIT_CNT)
+-						- 1) * level +
+-						127) / 255);
+-			if (led_data->cust.mode == MT65XX_LED_MODE_CUST_BLS_PWM)
+-				mt_mt65xx_led_set_cust(&led_data->cust,
+-					((((1 << MT_LED_INTERNAL_LEVEL_BIT_CNT)
+-						- 1) * level + 127) / 255));
+-			else
+-				mt_mt65xx_led_set_cust(&led_data->cust, level);
+ 		}
+ 	}
+ 	/* spin_unlock_irqrestore(&leds_lock, flags); */
+-- 
+2.43.0
