@@ -1,0 +1,170 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gezim <gezimos@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 12:00:00 +0100
+Subject: [PATCH] kompakt: meink's own redraws follow its dither
+
+meink redraws its newest frame by itself in four places: the clear on
+AOD entry, the full refresh every N updates, the deep full refresh and
+the clear-and-redraw of its operational state. Each asked for the frame
+undithered (hsmThreadedGetNewestFrameBuffer with 0), where a new frame
+takes the dithered copy whenever the render's dithering type (+0x34) is
+set. With Normal dither, which is meink's own, those redraws came out
+thresholded: the AOD wallpaper as hard black shapes after locking, and
+greys a Fast mode cannot clear after a full refresh. Pattern, Hybrid and
+Noise were not affected: the loader dithers before meink sees the frame.
+
+The loader now patches the four call sites at probe to pass the
+dithering type, after checking every instruction it changes and the
+target of every call around them; anything unexpected is left alone and
+logged.
+---
+--- a/drivers/misc/mudita/eink_loader/loader.c
++++ b/drivers/misc/mudita/eink_loader/loader.c
+@@ -2016,6 +2016,7 @@
+ static void kompakt_hold_init(void);
+ static void kompakt_hold_exit(void);
+ static void kompakt_queue_guard(void);
++static void kompakt_redraw_dither(void);
+ static struct notifier_block kompakt_reboot_nb;
+ 
+ static int eink_spi_probe(struct spi_device *spi)
+@@ -2037,6 +2038,7 @@
+     kompakt_bayer_thresholds();
+     kompakt_hold_init();
+     kompakt_queue_guard();
++    kompakt_redraw_dither();
+     register_reboot_notifier(&kompakt_reboot_nb);
+ 
+     g_einkData.eink_dbg_kobj = kobject_create_and_add("einkinfo", NULL);
+@@ -2311,7 +2313,129 @@
+             pr_err("kompakt-eink: event queue guard failed (%d)\n", err);
+         else
+             pr_info("kompakt-eink: event queue guard on\n");
++    }
++    module_put(mod);
++}
++
++/*
++ * meink redraws its newest frame by itself: the clear on AOD entry, the full
++ * refresh every N updates, ghost clearing. It asks for that frame undithered,
++ * where a new frame gets the dithered copy when meink's dither flag is set.
++ * Normal dither is meink's own, so those redraws came out as hard black shapes
++ * at 1 bpp, or greys a Fast mode cannot clear. Each redraw now reads the flag.
++ */
++#define RD_DITHER_X20   0xb9403681u     /* ldr w1, [x20, #0x34]: meink's dither flag */
++#define RD_DITHER_X19   0xb9403661u     /* ldr w1, [x19, #0x34] */
++#define RD_MOV_W1_ZERO  0x2a1f03e1u     /* mov w1, wzr */
++#define RD_MOV_X0_X20   0xaa1403e0u
++#define RD_MOV_X0_X19   0xaa1303e0u
++#define RD_LDR_TRIPLE   0xf9413660u     /* ldr x0, [x19, #0x268]: the triple buffer */
++#define RD_ADD_X1_SP4   0x910013e1u
++#define RD_MOV_X22_X0   0xaa0003f6u
++#define RD_MOV_X1_X22   0xaa1603e1u
++#define RD_NOP          0xd503201fu
++
++static const struct {
++    const char *fn;
++    unsigned int mov;                   /* mov w1, wzr; mov x0, x20 sits before it */
++    unsigned int bl;                    /* bl hsmThreadedGetNewestFrameBuffer */
++} kompakt_redraws[] = {
++    { "hsmThreadedClearAndRefreshScreen", 0x10c, 0x118 },
++    { "hsmThreadedRenderLastFrameHQ",     0x74,  0x80 },
++    { "hsmThreadedRenderLastFrameDeepHQ", 0x70,  0x7c },
++};
++
++/* operational_fun's clear-and-redraw reads the triple buffer itself; it gets the same call instead. */
++#define RD_OP_FN        "operational_fun"
++#define RD_OP_START     0x178           /* ldr x0, [x19, #0x268] */
++#define RD_OP_READ      0x180           /* bl EinkRenderTripleBufferRead */
++#define RD_OP_PRE       0x190           /* bl hsmThreadedPreProcessFrame */
++
++static unsigned long kompakt_bl_target(const u32 *pc)
++{
++    u32 op = READ_ONCE(*pc);
++
++    if ((op & 0xfc000000u) != 0x94000000u)
++        return 0;
++    return (unsigned long)pc + ((long)((s32)(op << 6) >> 6) << 2);
++}
++
++static u32 kompakt_bl_to(const u32 *pc, unsigned long target)
++{
++    long off = ((long)target - (long)(unsigned long)pc) >> 2;
++
++    return 0x94000000u | ((u32)off & 0x03ffffffu);
++}
++
++static void kompakt_redraw_dither(void)
++{
++    struct module *mod = meink_get();
++    unsigned long newest, readfn, prefn;
++    u32 *fn;
++    int i, done = 0, err;
++
++    if (!mod) {
++        pr_err("kompakt-eink: meink not found, redraws stay undithered\n");
++        return;
+     }
++    newest = meink_symbol(mod, "hsmThreadedGetNewestFrameBuffer", 4);
++    readfn = meink_symbol(mod, "EinkRenderTripleBufferRead", 4);
++    prefn = meink_symbol(mod, "hsmThreadedPreProcessFrame", 4);
++    if (!newest) {
++        pr_err("kompakt-eink: no newest-frame call, redraws stay undithered\n");
++        goto out;
++    }
++    for (i = 0; i < ARRAY_SIZE(kompakt_redraws); i++) {
++        fn = (u32 *)meink_symbol(mod, kompakt_redraws[i].fn, kompakt_redraws[i].bl + 4);
++        if (!fn || READ_ONCE(fn[kompakt_redraws[i].mov / 4 - 1]) != RD_MOV_X0_X20 ||
++            kompakt_bl_target(&fn[kompakt_redraws[i].bl / 4]) != newest) {
++            pr_err("kompakt-eink: %s not as expected, left undithered\n", kompakt_redraws[i].fn);
++            continue;
++        }
++        if (READ_ONCE(fn[kompakt_redraws[i].mov / 4]) == RD_DITHER_X20) {
++            done++;
++            continue;
++        }
++        if (READ_ONCE(fn[kompakt_redraws[i].mov / 4]) != RD_MOV_W1_ZERO) {
++            pr_err("kompakt-eink: %s not as expected, left undithered\n", kompakt_redraws[i].fn);
++            continue;
++        }
++        err = kompakt_text_poke32(&fn[kompakt_redraws[i].mov / 4], RD_DITHER_X20);
++        if (err)
++            pr_err("kompakt-eink: %s redraw patch failed (%d)\n", kompakt_redraws[i].fn, err);
++        else
++            done++;
++    }
++
++    fn = (u32 *)meink_symbol(mod, RD_OP_FN, RD_OP_PRE + 4);
++    if (fn && READ_ONCE(fn[RD_OP_START / 4]) == RD_MOV_X0_X19 &&
++        READ_ONCE(fn[RD_OP_START / 4 + 1]) == RD_DITHER_X19 &&
++        kompakt_bl_target(&fn[RD_OP_READ / 4]) == newest) {
++        done++;
++    } else if (!fn || !readfn || !prefn ||
++               READ_ONCE(fn[RD_OP_START / 4]) != RD_LDR_TRIPLE ||
++               READ_ONCE(fn[RD_OP_START / 4 + 1]) != RD_ADD_X1_SP4 ||
++               kompakt_bl_target(&fn[RD_OP_READ / 4]) != readfn ||
++               READ_ONCE(fn[RD_OP_READ / 4 + 1]) != RD_MOV_X22_X0 ||
++               READ_ONCE(fn[RD_OP_READ / 4 + 2]) != RD_MOV_X0_X19 ||
++               READ_ONCE(fn[RD_OP_READ / 4 + 3]) != RD_MOV_X1_X22 ||
++               kompakt_bl_target(&fn[RD_OP_PRE / 4]) != prefn) {
++        pr_err("kompakt-eink: %s not as expected, left undithered\n", RD_OP_FN);
++    } else {
++        /* Tail first: until the call is swapped the old path still runs, minus a pass it never used. */
++        err = kompakt_text_poke32(&fn[RD_OP_PRE / 4], RD_NOP);
++        err = err ?: kompakt_text_poke32(&fn[RD_OP_READ / 4 + 3], RD_NOP);
++        err = err ?: kompakt_text_poke32(&fn[RD_OP_READ / 4 + 2], RD_NOP);
++        err = err ?: kompakt_text_poke32(&fn[RD_OP_START / 4], RD_MOV_X0_X19);
++        err = err ?: kompakt_text_poke32(&fn[RD_OP_START / 4 + 1], RD_DITHER_X19);
++        err = err ?: kompakt_text_poke32(&fn[RD_OP_READ / 4], kompakt_bl_to(&fn[RD_OP_READ / 4], newest));
++        if (err)
++            pr_err("kompakt-eink: %s redraw patch failed (%d)\n", RD_OP_FN, err);
++        else
++            done++;
++    }
++    pr_info("kompakt-eink: %d of 4 redraws follow meink's dither\n", done);
++out:
+     module_put(mod);
+ }
+ 
+-- 
+2.43.0

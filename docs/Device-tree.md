@@ -45,8 +45,8 @@ line.
 `dtc -I dtb -O dts` on the shipping images gives the resolved trees:
 
 ```
-dts/kompakt-base.dts       4,366 lines   from boot.img
-dts/kompakt-overlay.dts    1,833 lines   from dtbo.img
+dts/kompakt-base.dts       4,367 lines   from boot.img
+dts/kompakt-overlay.dts    1,834 lines   from dtbo.img
 ```
 
 Macro names are lost, every value is kept, and the overlay recompiles to the

@@ -1,7 +1,7 @@
 # dtbo
 
 Builds `dtbo.img`, the device tree overlay, from Mudita's published kernel
-source. The result is byte-identical to the `dtbo.img` Mudita ship, so there is
+source. The result is byte-identical to the `dtbo.img` Mudita ships, so there is
 no need to flash it. It is the baseline to diff against before changing the
 board's hardware description.
 

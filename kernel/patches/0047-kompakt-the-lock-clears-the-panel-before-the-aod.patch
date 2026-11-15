@@ -1,0 +1,115 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gezim <gezimos@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 21:00:00 +0200
+Subject: [PATCH] kompakt: the lock clears the panel before the AOD
+
+Locking with AOD on showed the AOD, a black flash, then the AOD again.
+The clear at the AOD entry (0035) runs when the display switches to DOZE,
+and Android draws the AOD before that switch (lock at 19:59:11.44, AOD
+frames at 12.31 to 12.46, DOZE and the clear at 12.57).
+
+SystemUI (KompaktOS frameworks_base 0139) now writes 1 to
+kompakt_wf_lockclear as the lock starts. The loader runs the same GL16 to
+A2 flash then, over the awake screen, and leaves meink on A2; the DOZE
+entry finds nothing left to clear. SystemUI writes 0 at the wake: a lock
+that never reached DOZE gets the user's mode back. Without the write, the
+DOZE entry clears as before.
+---
+--- a/drivers/misc/mudita/eink_loader/loader.c
++++ b/drivers/misc/mudita/eink_loader/loader.c
+@@ -1947,6 +1947,12 @@
+ }
+ static DEVICE_ATTR(kompakt_wf_dither_light, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_dither_light_show, kompakt_wf_dither_light_store);
+ 
++/* Kompakt: SystemUI's lock and wake, defined with the AOD entry below. */
++static ssize_t kompakt_wf_lockclear_show(struct device *dev, struct device_attribute *attr, char *buf);
++static ssize_t kompakt_wf_lockclear_store(struct device *dev, struct device_attribute *attr,
++                                          const char *buf, size_t count);
++static DEVICE_ATTR(kompakt_wf_lockclear, S_IWUSR|S_IWGRP | S_IRUGO, kompakt_wf_lockclear_show, kompakt_wf_lockclear_store);
++
+ static DEVICE_ATTR(refresh_time, S_IWUSR|S_IWGRP | S_IRUGO, refresh_time_show, refresh_time_store);
+ static DEVICE_ATTR(pixelbits, S_IWUSR|S_IWGRP | S_IRUGO, pixelbits_show, pixelbits_store);
+ static DEVICE_ATTR(waveform_mode, S_IWUSR|S_IWGRP | S_IRUGO, waveform_type_show, waveform_type_store);
+@@ -1997,6 +2003,7 @@
+     &dev_attr_kompakt_wf_dither_step.attr,
+     &dev_attr_kompakt_wf_dither_edge.attr,
+     &dev_attr_kompakt_wf_dither_light.attr,
++    &dev_attr_kompakt_wf_lockclear.attr,
+ 
+ 	NULL,
+ };
+@@ -2152,6 +2159,8 @@
+ 
+ /* Kompakt: the glass holds an awake screen or the sleep picture, not an AOD. */
+ static atomic_t kompakt_needs_clean = ATOMIC_INIT(1);
++/* Kompakt: a lock cleared the panel before its AOD and left meink on A2. */
++static atomic_t kompakt_lock_cleared = ATOMIC_INIT(0);
+ 
+ /* Kompakt: a wake whose frames reach meink but never the panel. */
+ static atomic_t kompakt_wake_frames = ATOMIC_INIT(0);
+@@ -2249,6 +2258,7 @@
+     if (event == FB_EARLY_EVENT_BLANK && evdata && evdata->data &&
+         *(int *)evdata->data == FB_BLANK_UNBLANK) {
+         atomic_set(&kompakt_needs_clean, 1);
++        atomic_set(&kompakt_lock_cleared, 0);
+         atomic_set(&kompakt_asleep, 0);
+         kompakt_wake_apply();
+         kompakt_restore_wf("unblank");
+@@ -2292,6 +2302,8 @@
+ {
+     if (on)
+         atomic_set(&kompakt_asleep, 1);
++    if (on && atomic_xchg(&kompakt_lock_cleared, 0))
++        pr_info("einkwake: AOD entry, cleared at the lock\n");
+     if (on && g_einkData.einkDrv && atomic_xchg(&kompakt_needs_clean, 0)) {
+         u8 *render = *(u8 **)((u8 *)g_einkData.einkDrv + KOMPAKT_MEINK_RENDER);
+ 
+@@ -2301,6 +2313,46 @@
+         pr_info("einkwake: AOD over an awake screen, meink clears it\n");
+     }
+     return meink_aod(on);
++}
++
++static DEFINE_MUTEX(kompakt_lock_mutex);
++
++static ssize_t kompakt_wf_lockclear_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++    return snprintf(buf, PAGE_SIZE, "%d\n", atomic_read(&kompakt_lock_cleared));
++}
++
++/*
++ * 1, from SystemUI as a lock starts with AOD on: clear the awake screen now,
++ * before SystemUI draws the AOD, the same GL16 to A2 flash as at the DOZE
++ * entry, and stay on A2 so that entry has nothing left to clear.
++ * 0, at the wake: a lock that never reached DOZE gets the user's mode back.
++ */
++static ssize_t kompakt_wf_lockclear_store(struct device *dev, struct device_attribute *attr,
++                                          const char *buf, size_t count)
++{
++    unsigned int v;
++
++    if (kstrtouint(buf, 10, &v) || v > 1)
++        return -EINVAL;
++    if (!g_einkData.einkDrv || atomic_read(&kompakt_final))
++        return count;
++    mutex_lock(&kompakt_lock_mutex);
++    if (v && !atomic_read(&kompakt_asleep) && atomic_xchg(&kompakt_needs_clean, 0)) {
++        u8 *render = *(u8 **)((u8 *)g_einkData.einkDrv + KOMPAKT_MEINK_RENDER);
++
++        if (render)
++            WRITE_ONCE(*(u32 *)(render + KOMPAKT_RENDER_SKIP_CLEAR), 0);
++        EinkSetWaveformType(g_einkData.einkDrv, kEinkWaveformGL16);
++        EinkSetWaveformType(g_einkData.einkDrv, kEinkWaveformA2);
++        atomic_set(&kompakt_lock_cleared, 1);
++        pr_info("einkwake: lock, meink clears the awake screen before the AOD\n");
++    } else if (!v && !atomic_read(&kompakt_asleep) && atomic_xchg(&kompakt_lock_cleared, 0)) {
++        atomic_set(&kompakt_needs_clean, 1);
++        kompakt_restore_wf("lock cancelled");
++    }
++    mutex_unlock(&kompakt_lock_mutex);
++    return count;
+ }
+ 
+ /*
+-- 
+2.43.0

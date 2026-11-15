@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gezim <gezimos@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 12:00:00 +0100
+Subject: [PATCH] kompakt: a wake that draws nothing is logged
+
+A wake within seconds of locking can leave meink taking every frame and
+drawing none: MeinkWriteImage returns 0, its consumer thread dispatches
+the frame and the state machine drops it, while sleep and wake keep
+succeeding. The panel keeps an old picture until a restart (build 459,
+2026-11-17, traced with kprobes).
+
+Two seconds after every unblank the loader compares the HAL's refresh
+count with the one at the unblank. If frames reached meink and none was
+drawn it logs it. It used to ask meink for a full clear as well; that
+never brought a frozen screen back, and it fired on healthy wakes whose
+one frame matched the glass, redrawing the screen in GL16 (build 462).
+---
+--- a/drivers/misc/mudita/eink_loader/loader.c
++++ b/drivers/misc/mudita/eink_loader/loader.c
+@@ -2017,6 +2017,7 @@
+ static void kompakt_hold_exit(void);
+ static void kompakt_queue_guard(void);
+ static void kompakt_redraw_dither(void);
++static struct delayed_work kompakt_wake_check_work;
+ static struct notifier_block kompakt_reboot_nb;
+ 
+ static int eink_spi_probe(struct spi_device *spi)
+@@ -2063,6 +2064,7 @@
+     unregister_reboot_notifier(&kompakt_reboot_nb);
+     kompakt_hold_exit();
+     cancel_work_sync(&kompakt_wf_wake_work);
++    cancel_delayed_work_sync(&kompakt_wake_check_work);
+     wf_exit();
+     EinkDeinit(g_einkData.einkDrv);
+ 
+@@ -2151,6 +2153,39 @@
+ /* Kompakt: the glass holds an awake screen or the sleep picture, not an AOD. */
+ static atomic_t kompakt_needs_clean = ATOMIC_INIT(1);
+ 
++/* Kompakt: a wake whose frames reach meink but never the panel. */
++static atomic_t kompakt_wake_frames = ATOMIC_INIT(0);
++static long kompakt_wake_refreshes;
++
++/* Panel refreshes completed since boot, from the HAL's refresh_time counter. */
++static long kompakt_refresh_count(void)
++{
++    char *buf = kmalloc(PAGE_SIZE, GFP_KERNEL), *c;
++    long n = -1;
++
++    if (!buf)
++        return -1;
++    eink_refresh_stats(buf, PAGE_SIZE);
++    c = strstr(buf, "count=");
++    if (c && sscanf(c, "count=%ld", &n) != 1)
++        n = -1;
++    kfree(buf);
++    return n;
++}
++
++static void kompakt_wake_check(struct work_struct *w);
++static DECLARE_DELAYED_WORK(kompakt_wake_check_work, kompakt_wake_check);
++
++static void kompakt_wake_check(struct work_struct *w)
++{
++    long now = kompakt_refresh_count();
++    int frames = atomic_read(&kompakt_wake_frames);
++
++    if (atomic_read(&kompakt_asleep) || now < 0 || !frames || now != kompakt_wake_refreshes)
++        return;
++    pr_err("kompakt-eink: wake drew nothing (%d frames, %ld refreshes)\n", frames, now);
++}
++
+ static int kompakt_update(void *ptr)
+ {
+     if (atomic_read(&kompakt_powering_down) || atomic_read(&kompakt_final)) {
+@@ -2160,6 +2195,7 @@
+                 atomic_inc_return(&kompakt_held));
+         return 0;
+     }
++    atomic_inc(&kompakt_wake_frames);
+     if (READ_ONCE(kompakt_bayer_on)) {
+         void *d = READ_ONCE(kompakt_dither) == 3 ? kompakt_hybrid(ptr) : kompakt_bayer(ptr);
+ 
+@@ -2202,6 +2238,9 @@
+         kompakt_wake_apply();
+         kompakt_restore_wf("unblank");
+         schedule_work(&kompakt_wf_wake_work);   /* table writes held while asleep, off the wake path */
++        atomic_set(&kompakt_wake_frames, 0);
++        kompakt_wake_refreshes = kompakt_refresh_count();
++        mod_delayed_work(system_wq, &kompakt_wake_check_work, 2 * HZ);
+     }
+     if (kompakt_is_powerdown(event, data)) {
+         atomic_set(&kompakt_needs_clean, 1);
+-- 
+2.43.0

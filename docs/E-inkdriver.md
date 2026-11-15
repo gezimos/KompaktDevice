@@ -130,7 +130,7 @@ device or per app. An app with no mode of its own gets **Fast + dither**.
 |---|---|---|---|---|
 | Fast | A2, 1 | 0.50, 10 | off | no flash, very high contrast; dark colours go black |
 | Fast, soft | A2, 1 | 1.25, 8 | off | no flash, less contrast, dark colours keep some detail |
-| Fast + dither | A2, 1 | 0.50, 12 | Floyd-Steinberg, 96 | no flash, greys as dots; the most detail at speed |
+| Fast + dither | A2, 1 | 0.50, 12 | Floyd-Steinberg, meink's cut-off (160) | no flash, greys as dots; the most detail at speed |
 | Text | GL16, 4 | 0.50, 12 | off | sharp greys for reading; slower |
 | Quality | GL16, 4 | 0.75, 10 | off | the cleanest picture; slowest |
 
@@ -279,8 +279,14 @@ meink does not know the name, so on a kernel without Auto the write is ignored,
 
 meink picks its waveform tables by panel temperature, in bands of about 3 °C. A
 positive offset tells it the panel is warmer than it is, so it drives shorter
-waveforms: faster, but less clean. The Kompakt app offers 0, 5, 10, 20, 30 and
-40 °C.
+waveforms: faster, but less clean. meink's own offset is 11 °C, and MuditaOS
+never writes another. The panel reports about 8 °C in a 20 °C room, so +11
+puts it in band 6: 11 A2 frames and 38 GL16 frames. The Kompakt app's Text /
+Quality mode speed row writes the offset: +7, +11, +13 or +18, for 46, 38, 33
+or 28 GL16 frames; 28 is the shortest the table has, from +16 up. Its Fast
+mode speed row writes `kompakt_wf_a2frames`, the A2 frame count (11 to 5),
+which no longer depends on the offset; 0, the band's own, when both rows are
+on their defaults.
 
 Mudita's vendor gives `temperature_offset` no label and no chmod, so our
 `meink_loader` also takes the offset on `eink_temperature`, which has both.
@@ -316,9 +322,15 @@ leave its AOD mode. Our kernel changes that path in four places:
   SystemUI (frameworks_base 0139) takes over the screen off whenever AOD is
   on, so there is no power-down and no sleep picture before the AOD.
 - **The AOD starts on a clean panel and runs in A2.** meink sets A2 on every
-  DOZE entry. Entering AOD over an awake screen, `meink_loader` first sets
-  GL16 with meink's skip-clear flag (render `+0x244`) down, so meink's own
-  GL16 to A2 switch clears black, white and redraws the newest frame
+  DOZE entry. Android draws the AOD before it switches the display to DOZE,
+  so the clear runs as the lock starts: SystemUI writes 1 to
+  `kompakt_wf_lockclear`, and `meink_loader` sets GL16 with meink's
+  skip-clear flag (render `+0x244`) down, then A2. meink's own GL16 to A2
+  switch clears black, white and redraws the newest frame
+  (`einkwake: lock, meink clears the awake screen before the AOD`), and the
+  DOZE entry has nothing left to clear (`AOD entry, cleared at the lock`).
+  SystemUI writes 0 at the wake; a lock that never reached DOZE gets the
+  chosen mode back. Without the write, the DOZE entry clears instead
   (`einkwake: AOD over an awake screen, meink clears it`). Minute ticks
   re-enter DOZE over the AOD and are left alone, so clock and notification
   updates draw in A2 whatever mode is chosen.
@@ -382,5 +394,22 @@ shutdown for a flat battery shows the flat-battery picture instead.
   by the fixed modes in §5.
 - An open driver (`kompakt_eink.ko`, drawing in meink's place or checking it in
   shadow mode), with its own Auto (touch start, DU2 entry) and a ghost cleanup
-  in the GC16 slot, ghosted more than meink in Fast; parked in 1.3, not
-  in this repo.
+  in the GC16 slot, ghosted more than meink in Fast; parked in 1.3, kept
+  in `parked/open-eink-driver/`.
+
+## 15. Credits
+
+No code from these was copied; the ideas and numbers named here were.
+
+- **Mudita**: the kernel source the loader and HAL are patched from (GPL-2.0),
+  and the meink driver whose behaviour the stack is built around.
+- **Caster and Glider, by Wenting Zhang (Modos)**: the 8 and 9 frame A2 lengths
+  of `kompakt_wf_a2frames` are Caster's default. The Glider README is where
+  most of what this document says about waveforms and panel driving was
+  learned. Caster is CERN-OHL-P v2; the Glider document is public domain.
+- **Ordered error diffusion, J. van der Zwan**: the Hybrid pattern (Atkinson's
+  diffusion rounded against a Bayer threshold).
+- **Void and cluster, Robert Ulichney**: the method that generated the blue
+  noise matrix of the Noise pattern.
+- **Bayer, Floyd and Steinberg, Atkinson**: the classic dithers behind
+  Pattern, Normal and Hybrid.

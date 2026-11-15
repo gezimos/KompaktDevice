@@ -57,6 +57,7 @@ bash $HERE/vendor/scripts/apply-open-eink.sh $V $W off
 bash $HERE/vendor/scripts/apply-eink-access.sh $V
 bash $HERE/vendor/scripts/apply-wifi-calling-access.sh $V
 bash $HERE/vendor/scripts/apply-offline-modem-gate.sh $V
+bash $HERE/vendor/scripts/apply-camera-switch-access.sh $V
 python3 - <<'PY'
 import os, sys
 V = os.environ['V']
@@ -122,6 +123,10 @@ echo "IMAGE_SPEECH_LEVELS=$(debugfs -R "cat /etc/audio_param/SpeechVol_AudioPara
 echo "IMAGE_LIGHTS_HAL_MATCH=$([ "$(debugfs -R "cat /bin/hw/android.hardware.lights-service.mediatek" $IMG 2>/dev/null | md5sum | cut -d' ' -f1)" = "$(md5sum < $LIGHTS | cut -d' ' -f1)" ] && echo yes || echo NO)"
 echo "IMAGE_LIGHTS_HAL_LABEL=$(debugfs -R "ea_get /bin/hw/android.hardware.lights-service.mediatek security.selinux" $IMG 2>/dev/null | tr -d '\0\n')"
 echo "IMAGE_LED_CHOWNS=$(debugfs -R "cat /etc/init/hw/init.project.rc" $IMG 2>/dev/null | grep -cE '^    chown system system /sys/class/leds/(red|green|blue)/')"
+echo "IMAGE_CAMERAGPIO_GENFSCON=$(debugfs -R "cat /etc/selinux/vendor_sepolicy.cil" $IMG 2>/dev/null | grep -c "genfscon sysfs /bus/platform/drivers/pmic-codec-accdet/cameragpio_state ")"
+echo "IMAGE_LMK_SWAP_LOW_20=$(debugfs -R "cat /build.prop" $IMG 2>/dev/null | grep -c '^ro.lmk.swap_free_low_percentage=20$')"
+echo "IMAGE_ZRAM_LZ4=$(debugfs -R "cat /etc/init/hw/init.ago.rc" $IMG 2>/dev/null | grep -c '^    write /sys/block/zram0/comp_algorithm lz4$')"
+echo "IMAGE_AGO_RC_LABEL=$(debugfs -R "ea_get /etc/init/hw/init.ago.rc security.selinux" $IMG 2>/dev/null | tr -d '\0\n')"
 echo "IMAGE_FREEZER_OVERRIDES=$(debugfs -R "cat /etc/task_profiles.json" $IMG 2>/dev/null | grep -cE '^      "Name": "(FreezerState|Frozen|Unfrozen)"')"
 echo "IMAGE_CCCI_MDINIT_DISABLED=$(debugfs -R "cat /etc/init/init.cccimdinit.rc" $IMG 2>/dev/null | grep -c 'Kompakt: started by kompakt-modem.rc')"
 echo "IMAGE_MODEM_GATE_RC=$(debugfs -R "cat /etc/init/kompakt-modem.rc" $IMG 2>/dev/null | grep -c '^    start ccci_mdinit$')"

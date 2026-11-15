@@ -1,3 +1,4 @@
+// Decompiled from the boot.img Mudita ships: dtc -I dtb -O dts. See docs/Device-tree.md.
 /dts-v1/;
 
 / {

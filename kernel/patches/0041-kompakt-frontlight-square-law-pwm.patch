@@ -1,7 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Gezim <gezimos@users.noreply.github.com>
-Date: Tue, 10 Nov 2026 14:00:00 +0200
-Subject: [PATCH] kompakt: the front light's PWM by a square law, so dim light has steps
+Date: Wed, 11 Nov 2026 13:30:00 +0200
+Subject: [PATCH] kompakt: the front light's PWM by a square law over a 12-bit
+ period, so dim light has steps
 
 Android sends the front light 255 steps. Stock mapped them linearly to 127
 duties (CONFIG_LIGHTNESS_MAPPING_VALUE) and those to the 10-bit PWM in steps
@@ -11,34 +12,58 @@ five distinct levels, each 25 to 100 percent more light than the one before,
 so every change of room the auto curve followed was a visible jump, however
 slowly the framework ramped.
 
-The front light (led_mode 5, BLS PWM) now takes its PWM straight from the
-level by a square law, 510 * (level / 255)^2 of 1023, never below 1 while
-on. The top is stock's 510; below the old fifth step there are now twenty
-distinct duties, and the automatic ramp has something to walk. The other LED
-modes keep the stock mapping. A one-time kernel line names the map, and the
-backlight_debug_log line's "map:" is now the PWM duty, 0 to 510.
+The front light (led_mode 5, BLS PWM) takes its PWM straight from the level
+by a square law. The other LED modes keep the stock mapping; everything else
+that reads the backlight gets level_1024, 510 * (level / 255)^2 of 1023, never
+below 1 while on, the same top as stock's 510.
+
+DISP_PWM's CON_1 period field is 12 bits on this IP generation (the same
+register layout as the 12-bit parts the upstream pwm-mtk-disp driver
+handles). The first time the front light is set, the driver writes a 4095
+period and reads it back. If it took, the clock divider drops by the same
+factor, (div + 1) * (period + 1) unchanged (div 3 at 1023 becomes div 0 at
+4095), so the PWM frequency is exactly what it was, and every later config
+keeps the pair. The front light then sends a fine duty, 2040 * (level / 255)^2
+of 4096: the same light at every level with sixteen times stock's steps at
+the dim end, twenty distinct values over Android levels 2 to 28. If the period
+did not take, the old period is put back and the light runs on level_1024. A
+one-time kernel line says which; a re-apply through the stock path (thermal
+limits) reuses the last fine duty. The backlight_debug_log "map:" is the fine
+duty, 0 to 2040.
 
 The Kompakt app's curve (LightCurve.kt) and the overlay curve carry their
 levels in these steps; the app rewrites a curve saved in the old steps once
 at boot.
 ---
- drivers/misc/mediatek/leds/mt6765/mtk_leds.c | 54 +++++++++++++++-------
- 1 file changed, 37 insertions(+), 17 deletions(-)
+ drivers/misc/mediatek/leds/mt6765/mtk_leds.c  |  69 ++++++++---
+ .../mediatek/video/common/pwm10/ddp_pwm.c     | 115 +++++++++++++++++-
+ drivers/misc/mediatek/video/include/ddp_pwm.h |   2 +
+ 3 files changed, 167 insertions(+), 19 deletions(-)
 
+diff --git a/drivers/misc/mediatek/leds/mt6765/mtk_leds.c b/drivers/misc/mediatek/leds/mt6765/mtk_leds.c
+index 9b8cc9b..97b60d8 100644
 --- a/drivers/misc/mediatek/leds/mt6765/mtk_leds.c
 +++ b/drivers/misc/mediatek/leds/mt6765/mtk_leds.c
-@@ -674,6 +674,20 @@
+@@ -674,6 +674,28 @@ void mt_mt65xx_led_work(struct work_struct *work)
  	mutex_unlock(&leds_mutex);
  }
  
 +/*
-+ * Kompakt: the front light's PWM duty, 0 to 510 of 1023, from Android's level, 0 to 255, by a
++ * Kompakt: the front light's PWM duty, 0 to 2040 of 4096, from Android's level, 0 to 255, by a
 + * square law. Stock mapped the level linearly to 127 duties and those to the PWM in steps of 4,
 + * so the bottom five percent of light, all a front light on e-ink needs, had five steps and every
 + * change of room was a visible jump. The square law keeps stock's top (half the PWM range) and
-+ * spends the steps where the eye is: twenty distinct duties below the old fifth step.
++ * spends the steps where the eye is; the 12-bit period (ddp_pwm.c) gives four times the steps.
 + */
 +static int kompakt_frontlight_pwm(int level)
++{
++	if (level <= 0)
++		return 0;
++	return max(1, (level * level * 2040 + 32512) / 65025);
++}
++
++/* Kompakt: the same light in a 1023 period, as patch 0041 sent it; used if 4095 does not take. */
++static int kompakt_frontlight_coarse(int level)
 +{
 +	if (level <= 0)
 +		return 0;
@@ -48,7 +73,7 @@ at boot.
  void mt_mt65xx_led_set(struct led_classdev *led_cdev, enum led_brightness level)
  {
  	struct mt65xx_led_data *led_data =
-@@ -722,25 +736,35 @@
+@@ -722,25 +744,38 @@ void mt_mt65xx_led_set(struct led_classdev *led_cdev, enum led_brightness level)
  				   led_data->level, jiffies);
  			schedule_work(&led_data->work);
  		} else {
@@ -57,12 +82,15 @@ at boot.
 -				level = 1;
 +			/* Kompakt: the front light takes its PWM straight from the level (kompakt_frontlight_pwm). */
 +			if (led_data->cust.mode == MT65XX_LED_MODE_CUST_BLS_PWM) {
++				int coarse = kompakt_frontlight_coarse(level);
++
 +				level = kompakt_frontlight_pwm(level);
-+				pr_info_once("kompakt-frontlight: square-law PWM map, %d of 1023 at full\n",
++				pr_info_once("kompakt-frontlight: square-law PWM map, %d of 4096 at full\n",
 +					     kompakt_frontlight_pwm(255));
 +				backlight_debug_log(led_data->level, level);
-+				disp_pq_notify_backlight_changed(level);
-+				mt_mt65xx_led_set_cust(&led_data->cust, level);
++				disp_pq_notify_backlight_changed(coarse);
++				bl_brightness_hal = coarse;
++				disp_pwm_set_backlight_fine(level, coarse);
  			} else {
 -				level =
 -				    (level * CONFIG_LIGHTNESS_MAPPING_VALUE) /
@@ -101,5 +129,186 @@ at boot.
  		}
  	}
  	/* spin_unlock_irqrestore(&leds_lock, flags); */
+diff --git a/drivers/misc/mediatek/video/common/pwm10/ddp_pwm.c b/drivers/misc/mediatek/video/common/pwm10/ddp_pwm.c
+index a910575..c762b0e 100644
+--- a/drivers/misc/mediatek/video/common/pwm10/ddp_pwm.c
++++ b/drivers/misc/mediatek/video/common/pwm10/ddp_pwm.c
+@@ -137,6 +137,17 @@ static bool g_pwm_first_config[PWM_TOTAL_MODULE_NUM];
+ #endif		/* CONFIG_FPGA_EARLY_PORTING */
+ static int g_pwm_log_num = PWM_LOG_BUFFER_SIZE;
+ 
++/*
++ * Kompakt: the front light's PWM period, 4095 once the 12-bit period has been seen to stick,
++ * else stock's 1023; the clock divider drops by the same factor, so the PWM frequency stays.
++ */
++static int kompakt_pwm_period = 1023;
++static unsigned int kompakt_pwm_div;
++static bool kompakt_pwm_probed;
++/* The last fine duty set and the level_1024 it was sent as, for re-applies through the stock path. */
++static int kompakt_last_fine = -1;
++static int kompakt_last_level = -1;
++
+ int disp_pwm_get_cust_led(unsigned int *clocksource, unsigned int *clockdiv)
+ {
+ 	struct device_node *led_node = NULL;
+@@ -306,6 +317,14 @@ static int disp_pwm_config_init(enum DISP_MODULE_ENUM module,
+ 			pwm_src, pwm_div);
+ 	}
+ 
++	/* Kompakt: once the 12-bit period took, every config keeps it (kompakt_pwm_probe). */
++	if (kompakt_pwm_period == 4095) {
++		DISP_REG_MASK(cmdq, reg_base + DISP_PWM_CON_0_OFF,
++			kompakt_pwm_div << 16, (0x3ff << 16));
++		DISP_REG_MASK(cmdq, reg_base + DISP_PWM_CON_1_OFF, 4095, 0xfff);
++		return 0;
++	}
++
+ 	/* We don't enable PWM until we really need */
+ 	DISP_REG_MASK(cmdq, reg_base + DISP_PWM_CON_0_OFF, pwm_div << 16,
+ 	(0x3ff << 16));
+@@ -557,16 +576,98 @@ int disp_pwm_set_backlight(enum disp_pwm_id_t id, int level_1024)
+ 	return 0;
+ }
+ 
++#ifndef CONFIG_FPGA_EARLY_PORTING
++/*
++ * Kompakt: tries the 12-bit period once, by the CPU, the first time the front light is set. It
++ * keeps it only if the period reads back, and moves the clock divider so that (div + 1) times
++ * (period + 1) stays what it was: the same PWM frequency, four times the steps.
++ */
++static void kompakt_pwm_probe(unsigned long reg_base)
++{
++	unsigned int con0 = DISP_REG_GET(reg_base + DISP_PWM_CON_0_OFF);
++	unsigned int old_div = (con0 >> 16) & 0x3ff;
++	unsigned int old_period = DISP_REG_GET(reg_base + DISP_PWM_CON_1_OFF) & 0xfff;
++	unsigned int got;
++	unsigned int cycles;
++
++	kompakt_pwm_probed = true;
++	DISP_REG_MASK(NULL, reg_base + DISP_PWM_CON_1_OFF, 4095, 0xfff);
++	got = DISP_REG_GET(reg_base + DISP_PWM_CON_1_OFF) & 0xfff;
++	if (got != 4095) {
++		DISP_REG_MASK(NULL, reg_base + DISP_PWM_CON_1_OFF, old_period, 0xfff);
++		pr_info("kompakt-pwm: 12-bit period did not take (read %u), staying at %u, div %u\n",
++			got, old_period, old_div);
++		return;
++	}
++	cycles = (old_div + 1) * (old_period + 1);
++	kompakt_pwm_div = cycles >= 8192 ? cycles / 4096 - 1 : 0;
++	DISP_REG_MASK(NULL, reg_base + DISP_PWM_CON_0_OFF, kompakt_pwm_div << 16, (0x3ff << 16));
++	kompakt_pwm_period = 4095;
++	pr_info("kompakt-pwm: 12-bit period, 4095 at div %u (was %u at div %u)\n",
++		kompakt_pwm_div, old_period, old_div);
++}
++
++/* Kompakt: the high width for a fine duty (0 to 4095 of 4096), or level_1024 if 4095 did not take. */
++static int kompakt_pwm_width(unsigned long reg_base, int fine, int level_1024, int max_level_1024)
++{
++	if (!kompakt_pwm_probed)
++		kompakt_pwm_probe(reg_base);
++	if (kompakt_pwm_period == 4095) {
++		/* A stale config written before the probe cannot leave the period short. */
++		DISP_REG_MASK(NULL, reg_base + DISP_PWM_CON_0_OFF,
++			kompakt_pwm_div << 16, (0x3ff << 16));
++		DISP_REG_MASK(NULL, reg_base + DISP_PWM_CON_1_OFF, 4095, 0xfff);
++		return clamp(fine, 1, max(1, max_level_1024 * 4));
++	}
++	return level_1024;
++}
++
++static int disp_pwm_set_backlight_width(enum disp_pwm_id_t id,
++	int level_1024, void *cmdq, int fine);
++#endif
++
+ int disp_pwm_set_backlight_cmdq(enum disp_pwm_id_t id,
+ 	int level_1024, void *cmdq)
+ {
+ #ifndef CONFIG_FPGA_EARLY_PORTING
++	return disp_pwm_set_backlight_width(id, level_1024, cmdq, -1);
++#else
++	return 0;
++#endif
++}
++
++/*
++ * Kompakt: the front light at a fine duty, 0 to 4095 of 4096, with the same light as level_1024
++ * (0 only when fine is 0). level_1024 is what everything else that reads the backlight sees, and
++ * what is written if the 12-bit period did not take.
++ */
++int disp_pwm_set_backlight_fine(int fine, int level_1024)
++{
++#ifndef CONFIG_FPGA_EARLY_PORTING
++	enum disp_pwm_id_t id = disp_pwm_get_main();
++
++#ifdef MTK_DISP_IDLE_LP
++	disp_exit_idle_ex(__func__);
++#endif
++	/* Two fine duties can share a level_1024; the change must not be skipped. */
++	atomic_set(&g_pwm_is_change_state[index_of_pwm(id)], 1);
++	if (disp_pwm_set_backlight_width(id, level_1024, NULL, fine) >= 0)
++		disp_pwm_trigger_refresh(id, (level_1024 == 0));
++#endif
++	return 0;
++}
++
++#ifndef CONFIG_FPGA_EARLY_PORTING
++static int disp_pwm_set_backlight_width(enum disp_pwm_id_t id,
++	int level_1024, void *cmdq, int fine)
++{
+ 	/* PWM is excluded from FPGA bitfile */
+ 	unsigned long reg_base;
+ 	int old_pwm;
+ 	int index;
+ 	int abs_diff;
+ 	int max_level_1024;
++	int width;
+ 
+ 	if ((DISP_PWM_ALL & id) == 0) {
+ 		PWM_ERR("[ERROR] invalid id = 0x%x", id);
+@@ -605,8 +706,18 @@ int disp_pwm_set_backlight_cmdq(enum disp_pwm_id_t id,
+ 		reg_base = pwm_get_reg_base(id);
+ 
+ 		if (level_1024 > 0) {
++			/* Kompakt: the fine duty, or a re-apply of it, in the period that took. */
++			width = level_1024;
++			if (fine >= 0) {
++				width = kompakt_pwm_width(reg_base, fine, level_1024, max_level_1024);
++				kompakt_last_fine = fine;
++				kompakt_last_level = level_1024;
++			} else if (kompakt_pwm_period == 4095) {
++				width = level_1024 == kompakt_last_level && kompakt_last_fine > 0 ?
++					min(kompakt_last_fine, max_level_1024 * 4) : level_1024 * 4;
++			}
+ 			DISP_REG_MASK(cmdq, reg_base + DISP_PWM_CON_1_OFF,
+-				level_1024 << 16, 0x1fff << 16);
++				width << 16, 0x1fff << 16);
+ 
+ 			disp_pwm_set_enabled(cmdq, id, 1);
+ 		} else {
+@@ -626,9 +737,9 @@ int disp_pwm_set_backlight_cmdq(enum disp_pwm_id_t id,
+ 		/* print backlight once after device resumed */
+ 		disp_pwm_backlight_status(id, true);
+ 	}
+-#endif
+ 	return 0;
+ }
++#endif
+ 
+ static int ddp_pwm_power_on(enum DISP_MODULE_ENUM module, void *handle)
+ {
+diff --git a/drivers/misc/mediatek/video/include/ddp_pwm.h b/drivers/misc/mediatek/video/include/ddp_pwm.h
+index 285d923..bd90716 100644
+--- a/drivers/misc/mediatek/video/include/ddp_pwm.h
++++ b/drivers/misc/mediatek/video/include/ddp_pwm.h
+@@ -22,6 +22,8 @@ int disp_pwm_is_enabled(enum disp_pwm_id_t id);
+ int disp_pwm_set_backlight(enum disp_pwm_id_t id, int level_1024);
+ int disp_pwm_set_backlight_cmdq(enum disp_pwm_id_t id,
+ 	int level_1024, void *cmdq);
++/* Kompakt: the front light at a fine duty, 0 to 4095 of 4096, and the same light in 1024. */
++int disp_pwm_set_backlight_fine(int fine, int level_1024);
+ 
+ int disp_pwm_set_max_backlight(enum disp_pwm_id_t id, unsigned int level_1024);
+ int disp_pwm_get_max_backlight(enum disp_pwm_id_t id);
 -- 
-2.43.0
+2.56.0
+

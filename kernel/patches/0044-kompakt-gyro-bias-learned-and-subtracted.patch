@@ -1,0 +1,174 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gezim <gezimos@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 14:00:00 +0300
+Subject: [PATCH] kompakt: gyro bias learned at rest and subtracted
+
+The gyro reads about -1.7, -2.6 and -2.9 degrees a second lying still
+(build 456). Nothing corrects it: no calibration was ever saved in
+/mnt/vendor/nvcfg/sensor (no gyro_cali.json, no gyro_bias.json), the SCP
+firmware answered GYROSCOPE_IOCTL_ENABLE_CALI with "detect shake" on a
+phone lying flat, never sends a BIAS_ACTION, and ignored a bias written
+to gyrocali. MediaTek's video stabilization integrates the offset as a
+turn of about 3 degrees a second and pulls the picture sideways until it
+reaches its crop margin, in the first two seconds of every video.
+
+gyro_recv_data now learns the bias from the raw samples: two seconds in
+which no axis moves more than 1 degree a second peak to peak, and a mean
+under 10 degrees a second, give a new bias. It is kept in dynamic_cali
+and subtracted from every sample before it reaches the HAL. When it
+moves by more than 0.1 degree a second (at most once a minute) it goes
+out as a BIAS_ACTION through gyro_bias_report, which MediaTek's sensor
+HAL already saves as gyro_bias.json and writes back to gyrocali at
+start-up, so a learned bias survives a reboot. The factory path
+(/dev/gyroscope) still reads the raw rate.
+---
+ .../sensors-1.0/gyroscope/gyrohub/gyrohub.c   | 122 +++++++++++++++++-
+ 1 file changed, 119 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/misc/mediatek/sensors-1.0/gyroscope/gyrohub/gyrohub.c b/drivers/misc/mediatek/sensors-1.0/gyroscope/gyrohub/gyrohub.c
+index 5e173b2..cd91340 100644
+--- a/drivers/misc/mediatek/sensors-1.0/gyroscope/gyrohub/gyrohub.c
++++ b/drivers/misc/mediatek/sensors-1.0/gyroscope/gyrohub/gyrohub.c
+@@ -472,20 +472,136 @@ static void scp_init_work_done(struct work_struct *work)
+ #endif
+ }
+ 
++/* Kompakt: gyro bias learned at rest; the SCP firmware never calibrates this gyro. */
++#define KGB_UNITS_PER_DPS	131000		/* hub units: 7505747 per rad/s */
++#define KGB_WINDOW_NS		2000000000LL	/* still for 2 s */
++#define KGB_MIN_SAMPLES		20
++#define KGB_STILL_SPAN		KGB_UNITS_PER_DPS	/* peak to peak, per axis */
++#define KGB_MAX_BIAS		(10 * KGB_UNITS_PER_DPS)
++#define KGB_MIN_CHANGE		(KGB_UNITS_PER_DPS / 10)
++#define KGB_SAVE_GAP_NS		60000000000LL	/* one save a minute at most */
++
++struct kgb_window {
++	int64_t start_ns;
++	int64_t sum[3];
++	int32_t min[3];
++	int32_t max[3];
++	uint32_t n;
++};
++
++/* Kompakt: one raw sample in; true with the mean in bias[] after 2 s inside the span. */
++static bool kgb_add(struct kgb_window *w, const int32_t v[3], int64_t t_ns,
++		    int32_t bias[3])
++{
++	int i;
++
++	if (w->n == 0 || t_ns < w->start_ns) {
++		w->start_ns = t_ns;
++		w->n = 0;
++		for (i = 0; i < 3; i++) {
++			w->sum[i] = 0;
++			w->min[i] = v[i];
++			w->max[i] = v[i];
++		}
++	}
++	for (i = 0; i < 3; i++) {
++		if (v[i] < w->min[i])
++			w->min[i] = v[i];
++		if (v[i] > w->max[i])
++			w->max[i] = v[i];
++		if ((int64_t)w->max[i] - w->min[i] > KGB_STILL_SPAN) {
++			w->n = 0;	/* moved: start again from the next sample */
++			return false;
++		}
++		w->sum[i] += v[i];
++	}
++	w->n++;
++	if (t_ns - w->start_ns < KGB_WINDOW_NS || w->n < KGB_MIN_SAMPLES)
++		return false;
++	for (i = 0; i < 3; i++) {
++		bias[i] = (int32_t)(w->sum[i] / (int64_t)w->n);
++		if (bias[i] > KGB_MAX_BIAS || bias[i] < -KGB_MAX_BIAS) {
++			w->n = 0;
++			return false;
++		}
++	}
++	w->n = 0;
++	return true;
++}
++
++static struct kgb_window kgb_win;
++static int32_t kgb_saved[3];
++static bool kgb_saved_valid;
++static int64_t kgb_saved_ns;
++
++/* Kompakt: learn from a raw sample, keep the new bias and hand it to the HAL to save. */
++static void kgb_learn(struct gyrohub_ipi_data *obj, const int32_t v[3], int64_t t_ns)
++{
++	int32_t bias[3];
++	struct gyro_data data;
++	bool changed = false;
++	int i;
++
++	if (!kgb_add(&kgb_win, v, t_ns, bias))
++		return;
++	spin_lock(&calibration_lock);
++	if (!kgb_saved_valid) {
++		for (i = 0; i < 3; i++)
++			kgb_saved[i] = obj->dynamic_cali[i];
++		kgb_saved_valid = true;
++	}
++	for (i = 0; i < 3; i++)
++		obj->dynamic_cali[i] = bias[i];
++	for (i = 0; i < 3; i++) {
++		int64_t d = (int64_t)bias[i] - kgb_saved[i];
++
++		if (d > KGB_MIN_CHANGE || d < -KGB_MIN_CHANGE)
++			changed = true;
++	}
++	spin_unlock(&calibration_lock);
++	if (!changed || (kgb_saved_ns && t_ns - kgb_saved_ns < KGB_SAVE_GAP_NS))
++		return;
++	memset(&data, 0, sizeof(data));
++	data.x = bias[0];
++	data.y = bias[1];
++	data.z = bias[2];
++	if (gyro_bias_report(&data) >= 0) {
++		for (i = 0; i < 3; i++)
++			kgb_saved[i] = bias[i];
++		kgb_saved_ns = t_ns;
++		pr_info("kompakt-gyro: bias %d %d %d (mdps %d %d %d)\n",
++			bias[0], bias[1], bias[2],
++			bias[0] / (KGB_UNITS_PER_DPS / 1000),
++			bias[1] / (KGB_UNITS_PER_DPS / 1000),
++			bias[2] / (KGB_UNITS_PER_DPS / 1000));
++	}
++}
++
+ static int gyro_recv_data(struct data_unit_t *event, void *reserved)
+ {
+ 	int err = 0;
+ 	struct gyrohub_ipi_data *obj = obj_ipi_data;
+ 	struct gyro_data data;
++	int32_t raw[3], cali[3];
+ 
+ 	memset(&data, 0, sizeof(struct gyro_data));
+ 	if (event->flush_action == DATA_ACTION &&
+ 		READ_ONCE(obj->android_enable) == true) {
+ 		if (READ_ONCE(obj->android_enable) == false)
+ 			return 0;
+-		data.x = event->gyroscope_t.x;
+-		data.y = event->gyroscope_t.y;
+-		data.z = event->gyroscope_t.z;
++		raw[0] = event->gyroscope_t.x;
++		raw[1] = event->gyroscope_t.y;
++		raw[2] = event->gyroscope_t.z;
++		kgb_learn(obj, raw, (int64_t)event->time_stamp);
++		spin_lock(&calibration_lock);
++		cali[0] = obj->dynamic_cali[0];
++		cali[1] = obj->dynamic_cali[1];
++		cali[2] = obj->dynamic_cali[2];
++		spin_unlock(&calibration_lock);
++		/* Kompakt: the hub reports the raw rate; the bias comes off here */
++		data.x = raw[0] - cali[0];
++		data.y = raw[1] - cali[1];
++		data.z = raw[2] - cali[2];
+ 		data.status = event->gyroscope_t.status;
+ 		data.timestamp = (int64_t)event->time_stamp;
+ 		data.reserved[0] = event->reserve[0];
+-- 
+2.56.0
+
