@@ -1,0 +1,198 @@
+Kompakt: meink gets the newest frame, not one held through a refresh
+
+meink converts each frame as mtkfb hands it over, then waits for the
+refresh in progress, so it sends a frame captured a whole pass earlier
+even when newer ones have arrived.
+
+A gate in kompakt_update now lets one frame through at a time. A thread
+follows that frame's refresh on BUSY and reopens the gate just early
+enough for meink to take the newest frame by the time the pass ends,
+repainting one held meanwhile. The pass and meink's time with a frame
+are measured, so it follows the mode, steps and speed the Kompakt app
+sets. latch=0 (meink_loader parameter) is stock.
+
+Proton Mail, scripted swipes, kprobe timeline, same boot:
+
+                         frame age (median)   outdated   update cycle
+  Fast, 5 steps  stock   187-201 ms           ~62%       136 ms
+                 latch   107-129 ms           0%         136 ms
+  Fast, 2 steps  stock   125 ms               35%        88 ms
+                 latch   99 ms                0%         90 ms
+  Text           stock   627-645 ms           ~70%       576 ms
+                 latch   199-233 ms           0%         577 ms
+
+--- a/drivers/misc/mudita/eink_loader/loader.c
++++ b/drivers/misc/mudita/eink_loader/loader.c
+@@ -24,6 +24,9 @@
+ #include <linux/vmalloc.h>
+ #include <linux/reboot.h>
+ #include <linux/crc32.h>
++#include <linux/kthread.h>
++#include <linux/ktime.h>
++#include <linux/of_gpio.h>
+ 
+ MODULE_DESCRIPTION("E-Ink driver loader");
+ MODULE_LICENSE("GPL");
+@@ -1755,8 +1758,119 @@ static void kompakt_drain_update(void)
+     release_screen_buffer();
+ }
+ 
++/*
++ * Kompakt: hand meink the newest frame. meink converts a frame as it arrives,
++ * then waits out the refresh in progress, so it sends one captured a pass
++ * earlier. A gate in front of meink lets one frame through at a time. A thread
++ * follows that frame's refresh on BUSY and reopens the gate just early enough
++ * for meink to take the newest frame by the time the pass ends, repainting one
++ * held meanwhile. The pass and meink's time with a frame are measured, so the
++ * timing follows the mode, steps and speed set in the Kompakt app. latch=0 is
++ * stock. See docs/E-inkdriver.md.
++ */
++static int latch = 1;
++module_param(latch, int, 0644);
++MODULE_PARM_DESC(latch, "hand meink the newest frame when the panel frees up");
++
++/*
++ * From the panel: a waveform frame takes about 15 ms (a Fast pass is 46 ms at
++ * 2 steps and 91 at 5, Text 446), and a refresh starts at most 1.2 passes after
++ * its frame reached meink (55 ms at 2 steps). So BUSY low for under 10 ms is
++ * not a pass, no start within 2 passes means nothing changed, and 2 s is stuck.
++ */
++#define LATCH_BLIP_MS  10
++#define LATCH_STUCK_MS 2000
++
++static int kompakt_busy_gpio = -1;
++static struct task_struct *latch_task;
++static DECLARE_WAIT_QUEUE_HEAD(latch_wq);
++static DEFINE_SPINLOCK(latch_lock);
++static bool latch_open = true, latch_held;
++/* Last measured: the pass, and meink taking a frame. */
++static unsigned int latch_pass_ms, latch_hand_ms;
++
++/* Wait until BUSY reads ready (or busy), at most until the deadline. */
++static bool kompakt_wait_panel(bool ready, ktime_t until)
++{
++    while ((gpio_get_value(kompakt_busy_gpio) != 0) != ready) {
++        if (ktime_after(ktime_get(), until) || kthread_should_stop())
++            return false;
++        usleep_range(1000, 2000);
++    }
++    return true;
++}
++
++/* Whether this frame goes to meink now; a held one is repainted when the gate opens. */
++static bool kompakt_latch_pass(void)
++{
++    bool pass;
++
++    if (!READ_ONCE(latch) || !latch_task)
++        return true;
++    spin_lock(&latch_lock);
++    pass = latch_open;
++    latch_open = false;
++    latch_held = !pass;
++    spin_unlock(&latch_lock);
++    if (pass)
++        wake_up(&latch_wq);
++    return pass;
++}
++
++static void kompakt_latch_open(void)
++{
++    bool held;
++
++    spin_lock(&latch_lock);
++    latch_open = true;
++    held = latch_held;
++    latch_held = false;
++    spin_unlock(&latch_lock);
++    if (held)
++        kompakt_request_repaint();
++}
++
++/* The refresh of the frame just passed: when it started, or 0 if none did. */
++static ktime_t kompakt_latch_start(void)
++{
++    ktime_t until = ktime_add_ms(ktime_get(), latch_pass_ms ? 2 * latch_pass_ms : LATCH_STUCK_MS);
++    ktime_t start;
++
++    while (kompakt_wait_panel(false, until)) {
++        start = ktime_get();
++        if (!kompakt_wait_panel(true, ktime_add_ms(start, LATCH_BLIP_MS)))
++            return start;
++    }
++    return 0;
++}
++
++static int kompakt_latch_fn(void *unused)
++{
++    unsigned int lead;
++    ktime_t start;
++
++    while (!kthread_should_stop()) {
++        wait_event_interruptible(latch_wq, !READ_ONCE(latch_open) || kthread_should_stop());
++        start = kompakt_latch_start();
++        if (start) {
++            /* Open while meink, plus one poll, still has time for the newest frame... */
++            lead = latch_hand_ms + 2;
++            kompakt_wait_panel(true, ktime_add_ms(start, !latch_pass_ms ? LATCH_STUCK_MS :
++                                                  latch_pass_ms > lead ? latch_pass_ms - lead : 0));
++        }
++        kompakt_latch_open();
++        /* ...and time the whole pass for the next frame. */
++        if (start && kompakt_wait_panel(true, ktime_add_ms(start, LATCH_STUCK_MS)))
++            latch_pass_ms = ktime_ms_delta(ktime_get(), start);
++    }
++    return 0;
++}
++
+ static int kompakt_update(void *ptr)
+ {
++    ktime_t t = ktime_get();
++    int ret;
++
+     if (atomic_read(&kompakt_powering_down) || atomic_read(&kompakt_final)) {
+         /* Force the next capture to differ; under mtkfb's screen_buf_lock. */
+         ((u8 *)ptr)[0] ^= 0x01;
+@@ -1764,13 +1878,17 @@ static int kompakt_update(void *ptr)
+                 atomic_inc_return(&kompakt_held));
+         return 0;
+     }
++    if (!kompakt_latch_pass())
++        return 0;
+     if (READ_ONCE(kompakt_bayer_on)) {
+         void *d = READ_ONCE(kompakt_dither) == 3 ? kompakt_hybrid(ptr) : kompakt_bayer(ptr);
+ 
+         if (d)
+-            return meink_update(d);
++            ptr = d;
+     }
+-    return meink_update(ptr);
++    ret = meink_update(ptr);
++    latch_hand_ms = ktime_ms_delta(ktime_get(), t);
++    return ret;
+ }
+ 
+ static bool kompakt_is_powerdown(unsigned long event, void *data)
+@@ -1827,6 +1945,12 @@ static void kompakt_hold_init(void)
+     }
+     meink_update_owner = mod;
+     meink_update = (int (*)(void *))fn;
++    kompakt_busy_gpio = of_get_named_gpio(g_einkData.spi->dev.of_node, "eink,busy-gpio", 0);
++    if (gpio_is_valid(kompakt_busy_gpio)) {
++        latch_task = kthread_run(kompakt_latch_fn, NULL, "einklatch");
++        if (IS_ERR(latch_task))
++            latch_task = NULL;
++    }
+     fb_register_client(&kompakt_powerdown_begin_nb);
+     fb_register_client(&kompakt_powerdown_end_nb);
+     register_eink_refresh_func(kompakt_update);
+@@ -1842,6 +1966,9 @@ static void kompakt_hold_exit(void)
+     if (!meink_update)
+         return;
+     register_eink_refresh_func(meink_update);
++    kompakt_drain_update();
++    if (latch_task)
++        kthread_stop(latch_task);
+     fb_unregister_client(&kompakt_powerdown_end_nb);
+     fb_unregister_client(&kompakt_powerdown_begin_nb);
+     module_put(meink_update_owner);
