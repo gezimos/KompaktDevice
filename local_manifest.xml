@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <manifest>
-  <!-- Apply kernel/stub and kernel/patches before building. See kernel/README.md. -->
+  <!-- Mudita's release 1.5.0. Apply kernel/stub and kernel/patches before building. See kernel/README.md. -->
   <project name="mudita/MuditaOS-K-Kernel-opensource"
            path="kernel/mudita/kompakt"
            remote="github"
-           revision="master"
+           revision="c41ded21ef60c7b10b093daff263afe785b606ca"
+           upstream="master"
            clone-depth="1" />
 </manifest>

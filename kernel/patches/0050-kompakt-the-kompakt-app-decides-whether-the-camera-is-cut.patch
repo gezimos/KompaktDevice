@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gezim <gezimos@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 13:00:00 +0100
+Subject: [PATCH] kompakt: the Kompakt app decides whether the camera is cut
+
+Mudita's kernel cut the camera's analog supply (GPIO168) and every sensor
+power pin whenever the Offline+ switch was engaged: the switch interrupt
+set hwswitch_camera_is_permitted to 0 and imgsensor_hw_power_sequence
+forced it to 0 again at every open. Nothing in the app could change that,
+so the camera could not open in Offline+ whatever the Camera access row
+said.
+
+The switch no longer touches the camera flags. They are set only through
+cameragpio_state (camera_gpio_ctl), which the Kompakt app writes: 0 while
+Offline+ is on and Camera access is blocked, 1 otherwise. The camera is
+permitted at boot, so it is still recognized then.
+---
+diff --git a/drivers/misc/mediatek/irq_key/irq_key.c b/drivers/misc/mediatek/irq_key/irq_key.c
+--- a/drivers/misc/mediatek/irq_key/irq_key.c
++++ b/drivers/misc/mediatek/irq_key/irq_key.c
+@@ -258,14 +258,6 @@
+ 		input_report_key(irqkey_input, KEY_F6, 0);
+ 
+ 
+-		if (hwswitch_camera_recognized) {
+-		    printk("%s: set camera =permitted.\n", __func__);
+-		    hwswitch_camera_is_permitted = 1;
+-		    camera_gpio_state = 1;
+-		} else {
+-			    printk("%s: camera is not recognized!!\n", __func__);
+-		}
+-		
+ 		input_sync(irqkey_input);	
+ 
+ 		input_report_key(irqkey_input, KEY_HALL_OPEN, 1);
+@@ -280,14 +272,6 @@
+ 		input_report_key(irqkey_input, KEY_F7, 1);
+ 		input_sync(irqkey_input);
+ 		input_report_key(irqkey_input, KEY_F7, 0);
+-
+-		if (hwswitch_camera_recognized) {
+-		    printk("%s: set camera =forbidden.\n", __func__);
+-		    hwswitch_camera_is_permitted = 0;
+-		    camera_gpio_state = 0;
+-		} else {
+-		    printk("%s: camera is not recognized!!\n", __func__);
+-		}
+ 
+ 		input_sync(irqkey_input);	
+ 
+@@ -336,10 +320,6 @@
+ 			irq_key_state = 0;
+             		trig_type = IRQ_TYPE_LEVEL_LOW;
+ 			printk("%s %d -irq_pin = 1 - enter\n",__func__,__LINE__);
+-			if (hwswitch_camera_recognized) {
+-				hwswitch_camera_is_permitted = 1;
+-				camera_gpio_state = 1;
+-			}
+ 		}
+ 		else
+ 		{
+@@ -348,10 +328,6 @@
+             		trig_type = IRQ_TYPE_LEVEL_HIGH;
+ 			printk("%s %d --irq_pin = 0- enter\n",__func__,__LINE__);
+ 
+-			if (hwswitch_camera_recognized) {
+-				hwswitch_camera_is_permitted = 0;
+-				camera_gpio_state = 0;
+-			}
+ 		}
+ 
+ 		//camera avdd
+diff --git a/drivers/misc/mediatek/imgsensor/src/common/v1/imgsensor_hw.c b/drivers/misc/mediatek/imgsensor/src/common/v1/imgsensor_hw.c
+--- a/drivers/misc/mediatek/imgsensor/src/common/v1/imgsensor_hw.c
++++ b/drivers/misc/mediatek/imgsensor/src/common/v1/imgsensor_hw.c
+@@ -125,14 +125,7 @@
+ 	printk("%s: [irq_key_state=%d, hwswitch_camera_recognized=%d] hwswitch_camera_is_permitted=%d\n",
+ 		__func__, irq_key_state, hwswitch_camera_recognized, hwswitch_camera_is_permitted);
+ 
+-	if (irq_key_state == 1 && hwswitch_camera_recognized == 1) {
+-		/* lockkey state is lock and camera has been recognized, forbid camera function.*/
+-		/* The reason is that camera need to be recognized in booting up, otherwize,camera
+-		    application will be hided by android framework*/
+-		if (hwswitch_camera_is_permitted == 1)
+-		    	hwswitch_camera_is_permitted = 0;
+-	}
+-
++	/* Kompakt: the switch no longer decides; the Kompakt app does, through cameragpio_state. */
+ 	if (hwswitch_camera_is_permitted == 1) {
+ 			hwswitch_control_vcama_by_gpio168(TRUE);
+ 	} else {

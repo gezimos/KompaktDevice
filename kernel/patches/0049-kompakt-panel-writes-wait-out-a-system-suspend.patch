@@ -1,0 +1,124 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gezim <gezimos@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 23:00:00 +0100
+Subject: [PATCH] kompakt: panel writes wait out a system suspend
+
+meink's event thread is not freezable, so it keeps painting while the
+phone suspends; the lock's clear can still be running when the always-on
+display drops to DOZE_SUSPEND and the phone goes into deep sleep. Once
+the SPI controller is suspended its queue is stopped and spi_write
+returns -ESHUTDOWN, a failure meink does not expect (0038).
+
+Every SPI write in the HAL goes through eink_spi_write: on -ESHUTDOWN it
+sleeps 20 ms and tries again until the controller is back, for up to 30 s
+of awake time. A write that needed it, or that failed anyway, is logged
+with its command byte.
+---
+diff --git a/drivers/misc/mudita/eink_loader/eink_spi_hal.c b/drivers/misc/mudita/eink_loader/eink_spi_hal.c
+--- a/drivers/misc/mudita/eink_loader/eink_spi_hal.c
++++ b/drivers/misc/mudita/eink_loader/eink_spi_hal.c
+@@ -106,6 +106,26 @@
+ static int suppress_pof;
+ static unsigned char conf_cmd[8];
+ static unsigned int  conf_len;
++
++/*
++ * Kompakt: a system suspend stops the SPI queue (-ESHUTDOWN) while meink's thread,
++ * which the freezer does not stop, may still be painting; wait for the resume.
++ */
++static int eink_spi_write(struct spi_device *spi, const void *buf, size_t len)
++{
++    unsigned int waited = 0;
++    int ret = spi_write(spi, buf, len);
++
++    while (ret == -ESHUTDOWN && waited < 30000) {
++        msleep(20);
++        waited += 20;
++        ret = spi_write(spi, buf, len);
++    }
++    if (ret || waited)
++        pr_warn("einkspi: write %02x len=%zu %s after %u ms (%d)\n",
++                *(const unsigned char *)buf, len, ret ? "failed" : "sent", waited, ret);
++    return ret;
++}
+ 
+ /* De-ghost flash (white, then black) on screen-off: run it every Nth sleep. */
+ static int deghost_every = 8;
+@@ -491,7 +511,7 @@
+     hdr[0] = CMD_WINDOW;
+     eink_put_rect(hdr + 1, x0, bx->y0, w, rows);
+     eink_waitForReady(hw);
+-    if (spi_write(spi, hdr, 9))
++    if (eink_spi_write(spi, hdr, 9))
+         return -1;
+ 
+     out = kmalloc(bw * rows + 2, GFP_KERNEL);
+@@ -502,7 +522,7 @@
+     for (i = 0; i < rows; i++)
+         memcpy(out + 2 + i * bw, px + (bx->y0 + i) * rb + bx->c0, bw);
+     eink_waitForReady(hw);
+-    rc = spi_write(spi, out, bw * rows + 2);
++    rc = eink_spi_write(spi, out, bw * rows + 2);
+     kfree(out);
+     if (rc)
+         return -1;
+@@ -512,7 +532,7 @@
+     hdr[1] = mode;
+     eink_put_rect(hdr + 2, x0, bx->y0, w, rows);
+     eink_waitForReady(hw);
+-    return spi_write(spi, hdr, 10) ? -1 : 0;
++    return eink_spi_write(spi, hdr, 10) ? -1 : 0;
+ }
+ 
+ /* Stage the bbox of changed bytes so the refresh after a full frame can skip
+@@ -562,7 +582,7 @@
+         hdr[0] = CMD_WINDOW;
+         eink_put_rect(hdr + 1, x0, 0, w, EINK_H);
+         eink_waitForReady(hw);
+-        if (spi_write(spi, hdr, 9))
++        if (eink_spi_write(spi, hdr, 9))
+             return -1;
+     }
+ 
+@@ -570,7 +590,7 @@
+     hdr[1] = mode;
+     eink_put_rect(hdr + 2, x0, 0, w, EINK_H);
+     eink_waitForReady(hw);
+-    if (spi_write(spi, hdr, 10) == 0)
++    if (eink_spi_write(spi, hdr, 10) == 0)
+         return 0;
+ 
+     /* put the window back so the caller's own full refresh still works */
+@@ -578,7 +598,7 @@
+         hdr[0] = CMD_WINDOW;
+         eink_put_rect(hdr + 1, 0, 0, EINK_W, EINK_H);
+         eink_waitForReady(hw);
+-        spi_write(spi, hdr, 9);
++        eink_spi_write(spi, hdr, 9);
+     }
+     return -1;
+ }
+@@ -1017,10 +1037,10 @@
+ {
+     unsigned char pon = CMD_PON;
+ 
+-    spi_write(spi, &pon, 1);
++    eink_spi_write(spi, &pon, 1);
+     msleep(90);
+     if (conf_len)
+-        spi_write(spi, conf_cmd, conf_len);
++        eink_spi_write(spi, conf_cmd, conf_len);
+     panel_on = 1;
+     eink_force_full();
+     pr_info("einkspi: panel rail was down under a paint; PON re-sent\n");
+@@ -1147,7 +1167,7 @@
+         }
+     }
+     gTestLastStep = ktime_get();
+-    retVal = spi_write(spi, buf, size);
++    retVal = eink_spi_write(spi, buf, size);
+     if (dbglogLevel != 0)
+     {
+         nowtime = ktime_get();
+-- 
+2.43.0

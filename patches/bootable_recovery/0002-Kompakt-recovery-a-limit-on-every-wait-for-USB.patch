@@ -1,5 +1,5 @@
 From e720f4505313a4e53646008f2f03282c442a4115 Mon Sep 17 00:00:00 2001
-From: gezimos <>
+From: Gezim <gezimos@users.noreply.github.com>
 Date: Sat, 26 Sep 2026 15:17:33 +0200
 Subject: [PATCH 2/5] Kompakt: recovery: a limit on every wait for USB
 

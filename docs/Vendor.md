@@ -20,7 +20,7 @@ Our vendor is Mudita's, repacked with these changes:
 
 | file | change |
 |---|---|
-| `lib/modules/meink_hal.ko`, `meink_loader.ko` | ours, GPL, from kernel patch 0020 |
+| `lib/modules/meink_hal.ko`, `meink_loader.ko` | ours, GPL, from kernel patches 0020 and 0035 |
 | `lib/modules/meink.ko` | Mudita's, with our pictures ([Images.md](Images.md)) |
 | `lib64/hw/fpsensor_fingerprint.default.so`, `etc/fpsensor_nav.ini` | fingerprint navigation on (section 6) |
 | `etc/selinux/*.cil` | e-ink and battery nodes reachable, orphaned vendor types bound (section 2, [Battery.md](Battery.md)) |
@@ -32,20 +32,23 @@ It is flashed and shipped with every release.
 
 ## 1. Kernel modules
 
-`vendor/lib/modules/` holds the e-ink trio (`meink_hal.ko`, `meink.ko`,
+`vendor/lib/modules/` holds the e-ink modules (`meink_hal.ko`, `meink.ko`,
 `meink_loader.ko`), `mt6357-accdet.ko` (headset detect), connectivity (`wmt_drv`,
 `bt_drv_connac1x`, `wlan_drv_gen4m`, `wmt_chrdev_wifi`, `connfem`, `gps_drv`,
 `fmradio_drv_mt6631`), `fpsgo`, `met` and `trace_mmstat`.
 
 **`modules.load` is not used.** Modules load from explicit `exec` lines in
 `etc/init/hw/init.project.rc`, e-ink in the order `meink_hal`, `meink`,
-`meink_loader`. A new module needs its own line there.
+`meink_loader`. A new module needs its own line there, and a
+`modules.dep` line, which modprobe resolves it through.
 
 Headset detection is a vendor module, not part of the kernel image.
 `vendor/firmware/` has Wi-Fi, BT, GPU (`rgx.fw`), FM and touch firmware, and no
 e-ink firmware: the controller image is compiled into `meink.ko`.
 
-`lib/modules/kompakt_eink.ko` is an old shim still in the stage; nothing loads it.
+`vendor/scripts/apply-open-eink.sh <stage> <module dir> off` installs our HAL
+and loader and removes what an earlier install of the parked open driver left
+in the stage ([E-inkdriver.md](E-inkdriver.md) §14).
 
 ## 2. SELinux: the e-ink nodes
 
@@ -157,6 +160,50 @@ which the platform policy already lets read and write `sysfs_leds`.
   trigger (our kernels since 0020) or, on Mudita's kernel, to a solid light
   at one level. Ship this vendor with a boot image that has 0027.
 
+### The app freezer
+
+Android freezes a cached app through the task profiles `Frozen` and
+`Unfrozen`, which set the attribute `FreezerState`: `cgroup.freeze` in the
+cgroup v2 tree, as `/system/etc/task_profiles.json` defines it. libprocessgroup
+loads the vendor file after the system one and a vendor definition replaces
+the system one of the same name.
+
+- Mudita's `etc/task_profiles.json` defines all three again for a cgroup v1
+  freezer (`frozen/freezer.state`, `JoinCgroup frozen`) that no `cgroups.json`
+  on the phone mounts. `system_server`'s support probe
+  (`com_android_server_am_Freezer.cpp`) resolved `FreezerState` to a file that
+  does not exist and logged `Freezer disabled` at every boot.
+- `apply-freezer-profiles.sh` removes the three overrides (`FREEZER_PROFILES_OK`).
+  MediaTek's own `FreezerFrozen` and `FreezerThawed` profiles stay; nothing in
+  vendor uses them.
+- The probe also needs the binder half: kernel patch 0040 (boot 279).
+
+### The modem with Offline+ engaged
+
+Booted with the switch on, the modem fails its radio self-check inside its own
+start-up (`mml1_rf_error_check.c`, between its `+EIND: 64` and `+EIND: 128`
+marks, before the mux has sent it anything): the switch takes the RF path away
+in hardware. `ccci_mdinit` then resets it every 14 s, `gsm0710muxd` never sets
+`vendor.ril.mtk=1`, the RIL daemon never starts, and `com.android.phone` waits
+for the radio HAL until Android kills it at its start-up timeout and starts it
+again, for as long as the switch stays on. A flip while the modem is running is
+harmless: the radio goes off (`AT+EFUN=0`) and the modem keeps running.
+
+- `apply-offline-modem-gate.sh` (`OFFLINE_MODEM_GATE_OK`) makes `ccci_mdinit`
+  a `disabled` service and adds `etc/init/kompakt-modem.rc`: at `on boot`,
+  init runs `etc/kompakt-modem-gate.sh` (domain `kompakt_modem_gate`), which
+  reads the switch from `sysfs_irqkey` and sets `vendor.kompakt.modem` to 1
+  when it is off; `on property:vendor.kompakt.modem=1` starts `ccci_mdinit`.
+  Off at boot, the modem starts a few ms later than it did; on, it is not
+  started.
+- KompaktService sets the property on every flip (`OfflineWatcherService`),
+  so the modem boots the moment the switch is released. `vendor.kompakt.` is a
+  public vendor property (`vendor_kompakt_prop`), which is what lets a
+  `system_app` set it.
+- A switch node that cannot be read counts as off: the modem starts.
+- The phone process half is KompaktOS telephony patch 0006, which stops it
+  waiting for the HAL; this vendor only stops the modem from thrashing.
+
 ## 6. Fingerprint navigation
 
 Chipone's fingerprint HAL (`lib64/hw/fpsensor_fingerprint.default.so`) has a
@@ -211,12 +258,14 @@ WORK=<dir> LINEAGE=<tree> SYSTEM_IMG=<system.img> \
 ```
 
 It installs our `meink.ko` pictures (checking that only picture bytes differ
-from stock), `meink_loader.ko`, the e-ink access, the Wi-Fi calling access
+from stock), our `meink_hal.ko` and `meink_loader.ko` (`apply-open-eink.sh ... off`), the e-ink access, the Wi-Fi calling access
 (`apply-wifi-calling-access.sh`: `ipsec_mon` may read the privileged route
-details Android 16 guards, or the tunnel sends nothing), the fingerprint HAL and ini,
+details Android 16 guards, or the tunnel sends nothing), the modem gate
+(`apply-offline-modem-gate.sh`, `OFFLINE_MODEM_GATE_OK`), the fingerprint HAL and ini,
 `apply-usb-no-mass-storage.sh` (`USB_ADB_ACM ...`), the lights HAL
 (`apply-lights-hal.sh`, `LIGHTS_HAL_OK`), the power hints
-(`apply-power-hints.sh`, `POWER_TOUCH_FLOOR=1`) and
+(`apply-power-hints.sh`, `POWER_TOUCH_FLOOR=1`), the freezer profiles
+(`apply-freezer-profiles.sh`, `FREEZER_PROFILES_OK`) and
 `stamp-build-number.sh` (`STAMPED ...`). It checks labels after each edit,
 compiles the policy together with `SYSTEM_IMG`'s the way init does
 (`check-vendor-policy.sh`) and stops if it fails, makes the image, and reads
@@ -257,8 +306,10 @@ bash vendor/scripts/make-usa-vendor.sh <global stage> <stock USA vendor> <stock 
 
 It swaps only files that differ between the two stock vendors, refuses any file
 we have changed, keeps each file's label, and checks the result names the P6
-modem. Build the image from the USA stage the same way, and ship its own full
-update packages: a phone must get the edition that matches its modem.
+modem. Build its image with `STAGE=<usa stage> EDITION=usa` and the same
+build number, which writes `vendor-<build number>-usa.img`; `IMAGE_MD_APPS`
+reads `V236.P6`. Ship its own full update packages: a phone must get the edition
+that matches its modem.
 
 ### Checks
 

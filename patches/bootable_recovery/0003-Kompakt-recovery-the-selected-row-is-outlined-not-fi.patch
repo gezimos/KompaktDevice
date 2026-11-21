@@ -1,7 +1,7 @@
-From 7a213cf604d509942d65657219df7f2a705f0ec5 Mon Sep 17 00:00:00 2001
-From: gezimos <>
+From e70f7746d36391eb87a68aeb932ccc1a257af9ae Mon Sep 17 00:00:00 2001
+From: Gezim <gezimos@users.noreply.github.com>
 Date: Sat, 26 Sep 2026 15:30:24 +0200
-Subject: [PATCH 3/5] Kompakt: recovery: the selected row is outlined, not
+Subject: [PATCH 3/8] Kompakt: recovery: the selected row is outlined, not
  filled
 
 The selected row is outlined in ink, 3 px, instead of filled. Every row
@@ -9,11 +9,11 @@ keeps black text on paper.
 
 Change-Id: Ic82e9eae2c05dcd65dd24fe55ac3947f73522170
 ---
- recovery_ui/screen_ui.cpp | 30 ++++++++++++++++++++++--------
- 1 file changed, 22 insertions(+), 8 deletions(-)
+ recovery_ui/screen_ui.cpp | 28 ++++++++++++++++++++--------
+ 1 file changed, 20 insertions(+), 8 deletions(-)
 
 diff --git a/recovery_ui/screen_ui.cpp b/recovery_ui/screen_ui.cpp
-index b0c5b71e2d44fe10f16c8e8c2edc1262aade2927..9bcc25588724ce491c740f7b9bbed6139ff2a316 100644
+index f36ae5e1..2d7f0d2d 100644
 --- a/recovery_ui/screen_ui.cpp
 +++ b/recovery_ui/screen_ui.cpp
 @@ -183,6 +183,15 @@ int TextMenu::DrawHeader(int x, int y) const {
@@ -29,10 +29,10 @@ index b0c5b71e2d44fe10f16c8e8c2edc1262aade2927..9bcc25588724ce491c740f7b9bbed613
 +  draw.DrawHighlightBar(x + w - t, y, t, h);
 +}
 +
- int TextMenu::DrawItems(int /*x*/, int y, int screen_width, bool long_press) const {
+ int TextMenu::DrawItems(int x, int y, int screen_width, bool long_press) const {
    int horizontal_rule_height = 8;
    int offset = 0;
-@@ -197,15 +206,18 @@ int TextMenu::DrawItems(int /*x*/, int y, int screen_width, bool long_press) con
+@@ -197,15 +206,18 @@ int TextMenu::DrawItems(int x, int y, int screen_width, bool long_press) const {
    for (size_t i = MenuStart(); i < MenuEnd(); ++i) {
      const auto selected = i == selection();
  
@@ -44,16 +44,16 @@ index b0c5b71e2d44fe10f16c8e8c2edc1262aade2927..9bcc25588724ce491c740f7b9bbed613
 +    draw_funcs_.SetColor(UIElement::MENU_BG);
  
      int bar_height = padding + char_height_ + padding;
-     draw_funcs_.DrawHighlightBar(padding, y + offset, screen_width - (padding * 2), bar_height);
+     draw_funcs_.DrawHighlightBar(padding + x, y + offset, screen_width - (padding + x) * 2, bar_height);
 +    if (selected) {
 +      draw_funcs_.SetColor(long_press ? UIElement::MENU_SEL_BG_ACTIVE : UIElement::MENU_SEL_BG);
-+      DrawKompaktOutline(draw_funcs_, padding, y + offset, screen_width - (padding * 2),
++      DrawKompaktOutline(draw_funcs_, padding + x, y + offset, screen_width - (padding + x) * 2,
 +                         bar_height);
 +    }
  
 -    draw_funcs_.SetColor(selected ? UIElement::MENU_SEL_FG : UIElement::MENU);
 +    draw_funcs_.SetColor(UIElement::MENU);
-     offset += draw_funcs_.DrawTextLine(padding * 2, y + offset, TextItem(i), false /* bold */);
+     offset += draw_funcs_.DrawTextLine(padding * 2 + x, y + offset, TextItem(i), false /* bold */);
      offset += spacing;
    }
 @@ -271,10 +283,10 @@ int GraphicMenu::DrawItems(int x, int y, int screen_width, bool long_press) cons
@@ -70,3 +70,6 @@ index b0c5b71e2d44fe10f16c8e8c2edc1262aade2927..9bcc25588724ce491c740f7b9bbed613
      }
      draw_funcs_.DrawTextIcon(x, y + offset, item.get());
      offset += item->height;
+-- 
+2.43.0
+

@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gezim <gezimos@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 22:00:00 +0200
+Subject: [PATCH] kompakt: fast speed is the count asked for
+
+kompakt_wf_a2frames took 2 to 9, shortened only for 7 and below and
+lengthened only for 8 and 9. The panel reports about 8 C in a 20 C room,
+so at Mudita's +11 offset the A2 band has 11 frames, not 7: 8 and 9 did
+nothing there, and "7" was 11.
+
+It now takes 2 to 11 and gives every band exactly that count; 0 still
+leaves the band's own. The Kompakt app's Fast mode speed row (11, 9, 8,
+7, 6, 5) writes the count, and 0 when both speed rows are Mudita's.
+---
+--- a/drivers/misc/mudita/eink_loader/loader.c
++++ b/drivers/misc/mudita/eink_loader/loader.c
+@@ -1380,9 +1380,9 @@
+     if (group != WF_A2)
+         return 0;
+ 
+-    /* Kompakt: up to 7 any count below the band's own; 8 and 9 (Caster's) only lengthen. a2short is 5. */
++    /* Kompakt: the count asked for, 2 to 11, whatever the band's own; 0 leaves the band alone. a2short is 5. */
+     w = WF_A2N(flags);
+-    if (w > WF_A2_STOCK_N ? w > n : w && w < n) {
++    if (w && w != n) {
+         nn = w;
+         done |= WF_A2SHORT;
+     }
+@@ -1787,7 +1787,7 @@
+ static ssize_t kompakt_wf_a2frames_store(struct device *dev, struct device_attribute *attr,
+                                          const char *buf, size_t count)
+ {
+-    return wf_store_val(buf, count, WF_A2N_SHIFT, WF_A2N_MASK, 2, 9);
++    return wf_store_val(buf, count, WF_A2N_SHIFT, WF_A2N_MASK, 2, 11);
+ }
+ static ssize_t kompakt_wf_gl16trim_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+-- 
+2.43.0

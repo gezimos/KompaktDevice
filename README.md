@@ -25,8 +25,8 @@ KompaktDevice  the device   boot.img (kernel + recovery), vendor.img, dtbo
 
 ## What ours adds over Mudita's
 
-- Partial e-ink updates and an Auto mode: fast while the screen moves, clean
-  once it settles.
+- Partial e-ink updates, and Pattern, Hybrid and Noise dithers for the fast
+  mode.
 - An always-on display that lets the phone sleep: 3–4% overnight instead of
   about 20%.
 - Correct battery capacity and health, a real cycle count, and a charge limit

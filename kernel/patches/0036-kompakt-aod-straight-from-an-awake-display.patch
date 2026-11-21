@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gezim <gezimos@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 13:00:00 +0200
+Subject: [PATCH] kompakt: AOD straight from an awake display
+
+primary_display_check_power_mode() reports DOZE only for an alive path
+with the LCM in LCM_ON_LOW_POWER, and only the full resume set it. DOZE
+requested while the path is alive (locking with the always-on display on,
+no power-down first) took the DISP_ALIVE early exit, kept LCM_ON and left
+the driver reporting FB_RESUME with meink in AOD. The early exit now marks
+the LCM low power when the requested mode is DOZE, as mt6768's
+primary_display_lcm_power_on_state() does. The Kompakt LCM is a
+placeholder with an empty aod callback, so nothing is sent to a panel.
+
+---
+diff --git a/drivers/misc/mediatek/video/mt6765/videox/primary_display.c b/drivers/misc/mediatek/video/mt6765/videox/primary_display.c
+--- a/drivers/misc/mediatek/video/mt6765/videox/primary_display.c
++++ b/drivers/misc/mediatek/video/mt6765/videox/primary_display.c
+@@ -4935,6 +4935,17 @@
+ 			primary_display_set_lcm_power_state_nolock(LCM_ON);
+ 			DISPCHECK("kompakt-aod: forced LCM_ON on resume from DOZE\n");
+ 		}
++		/* Kompakt: DOZE straight from an awake path. The full resume that marks
++		 * the LCM low power is skipped, so mark it here, as mt6768 does.
++		 */
++		if (primary_display_get_power_mode_nolock() == DOZE &&
++			primary_display_get_lcm_power_state_nolock() !=
++			LCM_ON_LOW_POWER) {
++			if (pgc->plcm && pgc->plcm->drv && pgc->plcm->drv->aod)
++				disp_lcm_aod(pgc->plcm, 1);
++			primary_display_set_lcm_power_state_nolock(LCM_ON_LOW_POWER);
++			pr_info("kompakt-aod: DOZE from an awake path, LCM low power\n");
++		}
+ 		goto done;
+ 	}
+ 	mmprofile_log_ex(ddp_mmp_get_events()->primary_resume,
+-- 
+2.43.0
+

@@ -137,7 +137,6 @@ A shipping kernel is Mudita's 1.5.0 source plus **0020**, **0023**, **0024** and
 | `mudita/eink_loader/eink_spi_hal.c` | Partial updates: each frame is diffed against the last and only the changed rectangles are sent. `force_full` on both AOD transitions, so the first frame after a wake is not diffed against the AOD clock and dropped. Auto waveform mode (fast while the screen moves, quality once it settles). Refresh timing, optional SPI trace. A mutex serialises partial-update state against `eink_force_full()`. |
 | `mudita/eink_loader/loader.c` | `sleep_image` and `sleep_image_stock` in `/sys/einkinfo` (the sleep screen, see [Images.md](Images.md)); `refresh_time`; a store handler on `eink_temperature`; the repower request after a DOZE wake; dropping Android's last frame from the sleep screen. |
 | `mudita/eink_loader/eink_hal.h` | Declarations for the above. |
-| `drivers/misc/kompakt/kompakt_eink.c` | New module: a shim that takes over meink's callback table, forwards every call and can trace it. |
 | `mudita/battery_monitor/battery_monitor.c`, `power/supply/mtk_battery.c` | Real cycle count instead of a constant 1; design capacity 3000 mAh. See [Battery.md](Battery.md). |
 
 The e-ink work is described in [E-inkdriver.md](E-inkdriver.md).
@@ -185,14 +184,6 @@ display that is a clock frozen for minutes. `rgxccb.c` now ignores the request,
 so the check force-signals the dead fences (`Forced update command issued`) and
 the renderer carries on. The stalled-CCB action is compiled in on this device
 (`PVRSRV_STALLED_CCB_ACTION` in `config_kernel_user_mt6761.h`).
-
-### Stock kernel alternative
-
-`kernel/patch-aod-boot.sh` enables the AOD gate on Mudita's own kernel instead:
-it unpacks a stock `boot.img`, finds `primary_is_aod_supported` with
-`kallsyms-finder`, checks the prologue, overwrites 8 bytes with
-`mov w0,#1 ; ret`, recompresses with `gzip -n -9` and repacks with the stock
-header. It does only the gate; the rest of 0020 needs our kernel.
 
 ---
 

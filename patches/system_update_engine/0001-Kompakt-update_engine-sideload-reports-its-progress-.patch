@@ -1,5 +1,5 @@
 From 65520955910fd14c5a6bb7710a08491781eb1071 Mon Sep 17 00:00:00 2001
-From: gezimos <>
+From: Gezim <gezimos@users.noreply.github.com>
 Date: Sat, 26 Sep 2026 22:13:49 +0200
 Subject: [PATCH] Kompakt: update_engine: sideload reports its progress
  fraction

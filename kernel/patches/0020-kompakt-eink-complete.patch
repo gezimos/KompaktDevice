@@ -425,10 +425,10 @@ index 4f8da20c5002e2659f60b370139eb970bdfd6671..d302434b6c9c7e721ea1ee54911fae2d
 + */
 +static bool kompakt_eink_in_aod;
 +
-+/* Frame-path tracing (trigger, capture, flush, eink_update_func), off by
-+ * default. Set kompakt_frame_trace_on to arm it for 15 s after an AOD exit.
++/* Frame-path tracing (trigger, capture, flush, eink_update_func), armed for
++ * 15 s after every AOD exit; clear kompakt_frame_trace_on to turn it off.
 + */
-+static bool kompakt_frame_trace_on;
++static bool kompakt_frame_trace_on = true;
 +static unsigned long kompakt_trace_until;
 +
 +static void kompakt_arm_frame_trace(void)

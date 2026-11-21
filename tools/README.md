@@ -116,14 +116,14 @@ mounts it at first stage.
 ## make-ota-json.py: the Updater's list for one package
 
 The LineageOS Updater on the phone reads
-`releases/latest/download/<type>-<region>.json` from the KompaktOS repo, where
-type is `gapps` or `vanilla` and region is `global` or `usa`. Each release
-therefore carries four lists beside its four packages, one per package:
+`releases/latest/download/<type>-<region>-from-1.2.json` from the KompaktOS
+repo, where type is `gapps` or `vanilla` and region is `global` or `usa`. Each
+release therefore carries four lists beside its four packages, one per package:
 
 ```sh
-tools/make-ota-json.py KompaktOS-1.1-USA-GApps.zip system-gapps.img \
-    https://github.com/gezimos/KompaktOS/releases/download/v1.1/KompaktOS-1.1-USA-GApps.zip \
-    > gapps-usa.json
+tools/make-ota-json.py KompaktOS-1.3-USA-GApps.zip system-gapps.img \
+    https://github.com/gezimos/KompaktOS/releases/download/v1.3/KompaktOS-1.3-USA-GApps.zip \
+    > gapps-usa-from-1.2.json
 ```
 
 The date in the list comes from the system image, not the package: the package

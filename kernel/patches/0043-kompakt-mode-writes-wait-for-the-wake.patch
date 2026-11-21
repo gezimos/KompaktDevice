@@ -1,0 +1,272 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gezim <gezimos@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 23:00:00 +0100
+Subject: [PATCH] kompakt: mode writes wait for the wake
+
+From the AOD's entry (or the sleep screen's power-down) until the next
+unblank the panel may be unpowered: in DOZE_SUSPEND meink's rail is
+down. A waveform change written then (an app's e-ink mode applied at
+screen off) made meink upload a waveform table to the sleeping panel;
+the upload never returned, the hwcomposer thread blocked behind it at
+the next wake, and the screen stayed frozen with Android restarting
+system_server until a forced restart (build 453, app 402).
+
+The loader now keeps writes to waveform_mode, pixelbits, dither_type,
+dither_param, dither_colors and the waveform table dials while asleep
+and applies them at the unblank; table dials are uploaded from a work
+item after the wake, not on the wake path.
+---
+--- a/drivers/misc/mudita/eink_loader/loader.c
++++ b/drivers/misc/mudita/eink_loader/loader.c
+@@ -24,6 +24,7 @@
+ #include <linux/vmalloc.h>
+ #include <linux/reboot.h>
+ #include <linux/crc32.h>
++#include <linux/workqueue.h>
+ #include <asm/cacheflush.h>
+ 
+ MODULE_DESCRIPTION("E-Ink driver loader");
+@@ -507,8 +508,45 @@
+         return;
+     EinkSetWaveformType(g_einkData.einkDrv, type);
+     pr_info("einkwake: %s, back to %s\n", why, EinkGetWaveformModeName(type));
++}
++
++/* Kompakt: AOD entry or power-down until the next unblank; the panel may be unpowered, so mode writes wait for the wake. */
++static atomic_t kompakt_asleep = ATOMIC_INIT(0);
++static int kompakt_wake_bpp;            /* 0: nothing to apply at the wake */
++static int kompakt_wake_dither = -1;    /* -1: nothing to apply at the wake */
++static int kompakt_wake_dparam = -1;
++static int kompakt_wake_auto;
++
++static bool kompakt_wait_wake(const char *what)
++{
++    if (!atomic_read(&kompakt_asleep))
++        return false;
++    pr_info("einkwake: %s held until the wake\n", what);
++    return true;
+ }
+ 
++/* Kompakt: at the unblank, the writes held while asleep. */
++static void kompakt_wake_apply(void)
++{
++    int bpp = xchg(&kompakt_wake_bpp, 0);
++    int dither = xchg(&kompakt_wake_dither, -1);
++    int param = xchg(&kompakt_wake_dparam, -1);
++
++    if (bpp)
++        EinkSetBpp(g_einkData.einkDrv, bpp);
++    if (param >= 0)
++        EinkSetDitheringParameter(g_einkData.einkDrv, param);
++    if (dither >= 0)
++        kompakt_set_dither(dither);
++    if (bpp || param >= 0 || dither >= 0)
++        pr_info("einkwake: wake, held bpp %d dither %d/%d applied\n", bpp, dither, param);
++    if (xchg(&kompakt_wake_auto, 0)) {
++        eink_auto_enable(1, kompakt_auto_apply);
++        kompakt_auto_apply(0);
++        pr_info("einkauto: enabled at the wake\n");
++    }
++}
++
+ static ssize_t waveform_type_store(struct device *dev,
+ 				    struct device_attribute *attr,
+ 				    const char *buf, size_t count)
+@@ -529,18 +567,25 @@
+     if (strcmp(typeName, KOMPAKT_AUTO_NAME) == 0)
+     {
+         WRITE_ONCE(kompakt_user_wf, kEinkWaveformInvalid);
++        if (kompakt_wait_wake("auto")) {
++            WRITE_ONCE(kompakt_wake_auto, 1);
++            return count;
++        }
+         eink_auto_enable(1, kompakt_auto_apply);
+         kompakt_auto_apply(0);          /* start settled */
+         pr_info("einkauto: enabled\n");
+         return count;
+     }
+     eink_auto_enable(0, NULL);          /* any explicit mode turns auto off */
++    WRITE_ONCE(kompakt_wake_auto, 0);
+ 
+     type = EinkDecodeWaveformModeName(typeName);
+     if (type != kEinkWaveformInvalid)
+     {
+         WRITE_ONCE(kompakt_user_wf, type);
+-        EinkSetWaveformType(g_einkData.einkDrv, type);
++        /* Kompakt: applied by kompakt_restore_wf at the unblank. */
++        if (!kompakt_wait_wake("waveform"))
++            EinkSetWaveformType(g_einkData.einkDrv, type);
+     }
+     else
+     {
+@@ -662,6 +707,10 @@
+             return -EINVAL;
+     }
+ 
++    if (kompakt_wait_wake("pixelbits")) {
++        WRITE_ONCE(kompakt_wake_bpp, bpp);
++        return count;
++    }
+     if (EINK_CB && EINK_CB->setBpp) {
+         EinkSetBpp(g_einkData.einkDrv, bpp);
+     }
+@@ -688,7 +737,10 @@
+         return -EINVAL;
+     if (type < kEinkDithering_count)
+     {
+-        kompakt_set_dither(type);
++        if (kompakt_wait_wake("dither_type"))
++            WRITE_ONCE(kompakt_wake_dither, type);
++        else
++            kompakt_set_dither(type);
+     }
+     return count;
+ }
+@@ -712,7 +764,10 @@
+         return -EINVAL;
+     if (value <= 255)
+     {
+-        EinkSetDitheringParameter(g_einkData.einkDrv, value);
++        if (kompakt_wait_wake("dither_param"))
++            WRITE_ONCE(kompakt_wake_dparam, value);
++        else
++            EinkSetDitheringParameter(g_einkData.einkDrv, value);
+     }
+     return count;
+ }
+@@ -736,6 +791,13 @@
+ 
+     if (sscanf(buf, "%u", &nColors) != 1)
+         return -EINVAL;
++    if (nColors <= 255 && kompakt_wait_wake("dither_colors")) {
++        WRITE_ONCE(kompakt_wake_dither, nColors ? kEinkDitheringTypeFloydSteinbergOpt1
++                                                : kEinkDitheringTypeNotSpecified);
++        if (nColors)
++            WRITE_ONCE(kompakt_wake_dparam, nColors);
++        return count;
++    }
+     if (nColors == 0)
+     {
+         EinkSetDitheringType(g_einkData.einkDrv, kEinkDitheringTypeNotSpecified);
+@@ -1379,6 +1441,9 @@
+ 
+ static DEFINE_MUTEX(wf_mutex);
+ static unsigned int wf_flags;
++/* Kompakt: flags written while asleep, uploaded by kompakt_wf_wake after the unblank. Under wf_mutex. */
++static bool wf_wake_pending;
++static unsigned int wf_wake_flags;
+ static struct module *wf_owner;
+ static u8 *wf_live;                             /* meink_lut_value */
+ static u8 *wf_stock;                            /* its stock bytes */
+@@ -1635,6 +1700,7 @@
+         module_put(wf_owner);
+     }
+     wf_flags = 0;
++    wf_wake_pending = false;
+     if (display) {
+         mutex_lock((struct mutex *)(display + WF_DISP_API_MUTEX));
+         wf_unhook(display);
+@@ -1646,8 +1712,39 @@
+ static ssize_t wf_show(char *buf, unsigned int bit)
+ {
+     return snprintf(buf, PAGE_SIZE, "%d\n", !!(READ_ONCE(wf_flags) & bit));
++}
++
++static unsigned int wf_base(void)
++{
++    return wf_wake_pending ? wf_wake_flags : wf_flags;
+ }
+ 
++/* Under wf_mutex: apply now, or hold for the wake. */
++static int wf_set(unsigned int flags)
++{
++    int err;
++
++    if (kompakt_wait_wake("waveform table")) {
++        wf_wake_flags = flags;
++        wf_wake_pending = true;
++        return 0;
++    }
++    wf_wake_pending = false;
++    err = wf_apply(flags);                      /* rewriting a value forces a re-upload */
++    if (!err)
++        WRITE_ONCE(wf_flags, flags);
++    return err;
++}
++
++static void kompakt_wf_wake(struct work_struct *work)
++{
++    mutex_lock(&wf_mutex);
++    if (wf_wake_pending)
++        wf_set(wf_wake_flags);                  /* asleep again: stays held */
++    mutex_unlock(&wf_mutex);
++}
++static DECLARE_WORK(kompakt_wf_wake_work, kompakt_wf_wake);
++
+ static ssize_t wf_store(const char *buf, size_t count, unsigned int bit)
+ {
+     unsigned int flags;
+@@ -1656,10 +1753,8 @@
+     if (kstrtoint(buf, 10, &on) || (on != 0 && on != 1))
+         return -EINVAL;
+     mutex_lock(&wf_mutex);
+-    flags = on ? (wf_flags | bit) : (wf_flags & ~bit);
+-    err = wf_apply(flags);                      /* rewriting a value forces a re-upload */
+-    if (!err)
+-        WRITE_ONCE(wf_flags, flags);
++    flags = on ? (wf_base() | bit) : (wf_base() & ~bit);
++    err = wf_set(flags);
+     mutex_unlock(&wf_mutex);
+     return err ? err : count;
+ }
+@@ -1679,10 +1774,8 @@
+     if (kstrtouint(buf, 10, &v) || (v && (v < lo || v > hi)))
+         return -EINVAL;
+     mutex_lock(&wf_mutex);
+-    flags = (wf_flags & ~(mask << shift)) | (v << shift);
+-    err = wf_apply(flags);                      /* rewriting a value forces a re-upload */
+-    if (!err)
+-        WRITE_ONCE(wf_flags, flags);
++    flags = (wf_base() & ~(mask << shift)) | (v << shift);
++    err = wf_set(flags);
+     mutex_unlock(&wf_mutex);
+     return err ? err : count;
+ }
+@@ -1967,6 +2060,7 @@
+     /* Hand meink its own hook back before its deinit unregisters it. */
+     unregister_reboot_notifier(&kompakt_reboot_nb);
+     kompakt_hold_exit();
++    cancel_work_sync(&kompakt_wf_wake_work);
+     wf_exit();
+     EinkDeinit(g_einkData.einkDrv);
+ 
+@@ -2086,6 +2180,7 @@
+ {
+     if (kompakt_is_powerdown(event, data)) {
+         atomic_set(&kompakt_held, 0);
++        atomic_set(&kompakt_asleep, 1);
+         atomic_set(&kompakt_powering_down, 1);
+         kompakt_drain_update();
+     }
+@@ -2101,7 +2196,10 @@
+     if (event == FB_EARLY_EVENT_BLANK && evdata && evdata->data &&
+         *(int *)evdata->data == FB_BLANK_UNBLANK) {
+         atomic_set(&kompakt_needs_clean, 1);
++        atomic_set(&kompakt_asleep, 0);
++        kompakt_wake_apply();
+         kompakt_restore_wf("unblank");
++        schedule_work(&kompakt_wf_wake_work);   /* table writes held while asleep, off the wake path */
+     }
+     if (kompakt_is_powerdown(event, data)) {
+         atomic_set(&kompakt_needs_clean, 1);
+@@ -2135,6 +2233,8 @@
+  */
+ static int kompakt_aod(unsigned int on)
+ {
++    if (on)
++        atomic_set(&kompakt_asleep, 1);
+     if (on && g_einkData.einkDrv && atomic_xchg(&kompakt_needs_clean, 0)) {
+         u8 *render = *(u8 **)((u8 *)g_einkData.einkDrv + KOMPAKT_MEINK_RENDER);
+ 
+-- 
+2.43.0

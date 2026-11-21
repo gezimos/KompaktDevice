@@ -1,5 +1,5 @@
 From 7978a5104723720b0593c050f4190a5e44932683 Mon Sep 17 00:00:00 2001
-From: gezimos <>
+From: Gezim <gezimos@users.noreply.github.com>
 Date: Sat, 26 Sep 2026 16:56:09 +0200
 Subject: [PATCH 5/6] Kompakt: recovery: clear the panel before the first frame
 
