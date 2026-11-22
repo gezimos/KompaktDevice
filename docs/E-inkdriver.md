@@ -209,6 +209,15 @@ the Kompakt app sets it to 1 at boot, so every lock is cleared, as on stock.
 **Panel power.** If meink paints while the panel rail is off, `meink_hal` powers
 the panel on and resends its last configuration first.
 
+**Newest frame.** meink converts a frame as soon as it arrives and its event
+thread takes it at once, then waits for the refresh in progress, so without
+help the panel gets a frame captured a pass earlier. The loader lets one frame
+through at a time; its `einklatch` thread follows that frame's refresh on BUSY
+and reopens the gate when only meink's measured hand-over time is left in the
+pass, repainting so meink gets the newest capture. Off while asleep.
+`/sys/module/meink_loader/parameters/latch`: `1` (default) on, `0` stock;
+`latch_pass_ms`, `latch_hand_ms` and `latch_holds` read back (kernel patch 0051).
+
 ## 8. The sleep screen
 
 The sleep screen is a picture inside `meink.ko`, painted by meink itself on
