@@ -63,6 +63,7 @@ and comes from the vendor partition.
 | `0052-kompakt-mglru-keeps-the-vendor-modules-loading.patch` | the new MGLRU fields are hidden from genksyms and placed where no vendor module reads, so `meink.ko` and the other prebuilt modules keep their CRCs and offsets. Kernel image (boot) |
 | `0053-kompakt-mglru-on-by-default.patch` | `CONFIG_LRU_GEN` and `CONFIG_LRU_GEN_ENABLED`. `/sys/kernel/mm/lru_gen/enabled` reads `0x0001`, since the A53 has no hardware accessed bit. `echo 0` to it goes back to the old LRU without a reboot. Kernel image (boot) |
 | `0054-kompakt-mglru-without-the-pvg100-and-x86-leftovers.patch` | drops a PVG100 debug comment in `lru_gen_use_mm()` to match upstream, and reverts an x86 `pmd_bad()` change that only matters with `ARCH_HAS_NONLEAF_PMD_YOUNG`, which this tree does not define. Kernel image (boot) |
+| `0055-upstream-workingset-dont-drop-refault-information-prematurely.patch` | upstream 95f9ab2d596e (Linux 4.20). The shadow entry shrinker sized its budget by the file cache alone, so it threw away the anon shadows 0056 adds before they could be used. It now counts all memory, as upstream has since 4.20. Kernel image (boot) |
 
 Applying every patch above in order, after the stub, reproduces the shipping kernel tree exactly.
 
