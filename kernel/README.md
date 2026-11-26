@@ -61,6 +61,7 @@ and comes from the vendor partition.
 | `0048-kompakt-fast-speed-is-the-count-asked-for.patch` | `kompakt_wf_a2frames` shortened only for 7 and below and lengthened only for 8 and 9, written for an A2 band of 7 frames. The panel reports about 8 °C in a 20 °C room (SPI `40` reads `08`/`09`, battery 24 °C), so at Mudita's +11 the band is 6 and has 11 frames: 8 and 9 did nothing and the app's "7" was 11. It now takes 2 to 11 and sets exactly that count on every band; 0 leaves the band's own. A2 frames are all the same push, so any count is a valid record. Modules only |
 | `0051-kompakt-mglru.patch` | MGLRU (multi-gen LRU) from Linux 6.1, via Kyle Anderson's 4.19 backport for the Palm PVG100 (`solarkennedy/android_kernel_xiaomi_msm8937`, branch `pepito-24`, 70ed3b77f6de to 253a9ff4e4d1). His XArray swap cache commits are left out, and 0056 does their job on this tree's radix tree. Off until `CONFIG_LRU_GEN` is set. Kernel image (boot) |
 | `0052-kompakt-mglru-keeps-the-vendor-modules-loading.patch` | the new MGLRU fields are hidden from genksyms and placed where no vendor module reads, so `meink.ko` and the other prebuilt modules keep their CRCs and offsets. Kernel image (boot) |
+| `0053-kompakt-mglru-on-by-default.patch` | `CONFIG_LRU_GEN` and `CONFIG_LRU_GEN_ENABLED`. `/sys/kernel/mm/lru_gen/enabled` reads `0x0001`, since the A53 has no hardware accessed bit. `echo 0` to it goes back to the old LRU without a reboot. Kernel image (boot) |
 
 Applying every patch above in order, after the stub, reproduces the shipping kernel tree exactly.
 
