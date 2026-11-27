@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jackson Goode <54308792+jacksongoode@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 10:42:01 -0800
+Subject: [PATCH] kompakt: MGLRU keeps the vendor modules loading
+
+The new MGLRU fields change the symbol CRCs that Mudita's prebuilt modules
+were built against, and meink, Wi-Fi, BT, GPS, FM and accdet refuse to load.
+Hide them from genksyms. Nothing the modules read moves: task_struct takes a
+spare bit, mm_struct and mem_cgroup grow at the end, and trace_mmstat only
+reads node_zones[0] of pglist_data.
+---
+ include/linux/memcontrol.h | 2 +-
+ include/linux/mm_types.h   | 2 +-
+ include/linux/mmzone.h     | 4 ++--
+ include/linux/sched.h      | 8 ++++----
+ include/linux/swap.h       | 2 +-
+ 5 files changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/include/linux/memcontrol.h b/include/linux/memcontrol.h
+index 4ba4173e0..d86634bf9 100644
+--- a/include/linux/memcontrol.h
++++ b/include/linux/memcontrol.h
+@@ -311,7 +311,7 @@ struct mem_cgroup {
+ 	struct list_head event_list;
+ 	spinlock_t event_list_lock;
+ 
+-#ifdef CONFIG_LRU_GEN
++#if defined(CONFIG_LRU_GEN) && !defined(__GENKSYMS__)
+ 	/* per-memcg mm_struct list */
+ 	struct lru_gen_mm_list mm_list;
+ #endif
+diff --git a/include/linux/mm_types.h b/include/linux/mm_types.h
+index d0b06812b..46adcdf3a 100644
+--- a/include/linux/mm_types.h
++++ b/include/linux/mm_types.h
+@@ -520,7 +520,7 @@ struct mm_struct {
+ 		struct hmm *hmm;
+ #endif
+ 
+-#ifdef CONFIG_LRU_GEN
++#if defined(CONFIG_LRU_GEN) && !defined(__GENKSYMS__)
+ 		struct {
+ 			/* this mm_struct is on lru_gen_mm_list */
+ 			struct list_head list;
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index 907ff564b..3d99e1272 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -463,7 +463,7 @@ struct lruvec {
+ 	atomic_long_t			inactive_age;
+ 	/* Refaults at the time of last reclaim cycle */
+ 	unsigned long			refaults;
+-#ifdef CONFIG_LRU_GEN
++#if defined(CONFIG_LRU_GEN) && !defined(__GENKSYMS__)
+ 	/* evictable pages divided into generations */
+ 	struct lru_gen_struct		lrugen;
+ 	/* to concurrently iterate lru_gen_mm_list */
+@@ -948,7 +948,7 @@ typedef struct pglist_data {
+ 
+ 	unsigned long		flags;
+ 
+-#ifdef CONFIG_LRU_GEN
++#if defined(CONFIG_LRU_GEN) && !defined(__GENKSYMS__)
+ 	/* kswap mm walk data */
+ 	struct lru_gen_mm_walk	mm_walk;
+ #endif
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index dccc2b4b8..1c3aff9e3 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -811,10 +811,6 @@ struct task_struct {
+ 	unsigned			memcg_kmem_skip_account:1;
+ #endif
+ #endif
+-#ifdef CONFIG_LRU_GEN
+-	/* whether the LRU algorithm may apply to this access */
+-	unsigned			in_lru_fault:1;
+-#endif
+ #ifdef CONFIG_COMPAT_BRK
+ 	unsigned			brk_randomized:1;
+ #endif
+@@ -826,6 +822,10 @@ struct task_struct {
+ 	/* to be used once the psi infrastructure lands upstream. */
+ 	unsigned			use_memdelay:1;
+ #endif
++#if defined(CONFIG_LRU_GEN) && !defined(__GENKSYMS__)
++	/* whether the LRU algorithm may apply to this access */
++	unsigned			in_lru_fault:1;
++#endif
+ 
+ 	unsigned long			atomic_flags; /* Flags requiring atomic access. */
+ 
+diff --git a/include/linux/swap.h b/include/linux/swap.h
+index a01c25b9d..7ef93b6c2 100644
+--- a/include/linux/swap.h
++++ b/include/linux/swap.h
+@@ -128,7 +128,7 @@ union swap_header {
+  */
+ struct reclaim_state {
+ 	unsigned long reclaimed_slab;
+-#ifdef CONFIG_LRU_GEN
++#if defined(CONFIG_LRU_GEN) && !defined(__GENKSYMS__)
+ 	/* per-thread mm walk data */
+ 	struct lru_gen_mm_walk *mm_walk;
+ #endif

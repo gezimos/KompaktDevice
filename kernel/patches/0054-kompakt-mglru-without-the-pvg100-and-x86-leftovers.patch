@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jackson Goode <54308792+jacksongoode@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 12:32:11 -0800
+Subject: [PATCH] kompakt: MGLRU without the PVG100 and x86 leftovers
+
+Drop a comment in lru_gen_use_mm() about the PVG100 debug kernel, matching
+upstream. Revert the x86 pmd_bad() change, which only matters with
+ARCH_HAS_NONLEAF_PMD_YOUNG, a symbol this tree does not define.
+---
+ arch/x86/include/asm/pgtable.h | 3 +--
+ include/linux/mm_types.h       | 6 ------
+ 2 files changed, 1 insertion(+), 8 deletions(-)
+
+diff --git a/arch/x86/include/asm/pgtable.h b/arch/x86/include/asm/pgtable.h
+index 977958760..2a9c12ffb 100644
+--- a/arch/x86/include/asm/pgtable.h
++++ b/arch/x86/include/asm/pgtable.h
+@@ -826,8 +826,7 @@ static inline pte_t *pte_offset_kernel(pmd_t *pmd, unsigned long address)
+ 
+ static inline int pmd_bad(pmd_t pmd)
+ {
+-	return (pmd_flags(pmd) & ~(_PAGE_USER | _PAGE_ACCESSED)) !=
+-	       (_KERNPG_TABLE & ~_PAGE_ACCESSED);
++	return (pmd_flags(pmd) & ~_PAGE_USER) != _KERNPG_TABLE;
+ }
+ 
+ static inline unsigned long pages_to_mb(unsigned long npg)
+diff --git a/include/linux/mm_types.h b/include/linux/mm_types.h
+index 46adcdf3a..d1a8dc831 100644
+--- a/include/linux/mm_types.h
++++ b/include/linux/mm_types.h
+@@ -588,12 +588,6 @@ static inline void lru_gen_init_mm(struct mm_struct *mm)
+ 
+ static inline void lru_gen_use_mm(struct mm_struct *mm)
+ {
+-	/*
+-	 * The list node is momentarily empty while lru_gen_migrate_mm() moves
+-	 * the mm between memcgs; v10 carried a VM_WARN_ON here that fires on
+-	 * every memcg migration Android does for new processes (twice per
+-	 * boot on pepito under DEBUG_VM). Upstream dropped the check.
+-	 */
+ 	if (!(current->flags & PF_KTHREAD) && !nodes_full(mm->lru_gen.nodes))
+ 		nodes_setall(mm->lru_gen.nodes);
+ }
